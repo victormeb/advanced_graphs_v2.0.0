@@ -1,0 +1,2312 @@
+---
+#title: "R_Tables_and_Plots"
+#author: "Victor Espinosa and Alvaro Ciganda"
+#date: "11/20/2019"
+output: html_document
+
+params:
+  pid: 0
+  reportId: 0
+  server_url: ""
+  token: ""
+  dynamic_filter1: ""
+  dynamic_filter2: ""
+  dynamic_filter3: ""
+  lf1: ""
+  lf2: ""
+  lf3: ""
+
+---
+
+```{r setup, include=FALSE }
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE, message=FALSE)
+#knitr::opts_chunk$set(echo = TRUE, warning=TRUE, message=TRUE)
+
+#
+# R Class to plot graphs according to field type
+# Author: Victor Espinosa
+# Version: V1.0
+#
+
+# Used in general
+library(expss)            
+library(stringr) # to manipulate strings
+# library(installr) # to check if an object is empty
+library(Hmisc) # to capitalize a string (used in filter labels)
+
+# Used for connections
+library(RCurl)
+
+# Used in Likert graphs
+library(likert)
+require(HH)
+
+# Used in Bar graphs
+library(stringi)
+library(RColorBrewer)
+getPalette = colorRampPalette(brewer.pal(9, "Set2"))
+
+# Used in stacked bars and tables
+library(ggplot2)
+library(tidyr)
+library(psych)
+library(plyr)
+library(formattable)
+
+
+# Used in maps
+library("leaflet")
+library(htmlwidgets)
+library(htmltools)
+
+# Used in network graphs
+library(igraph)
+
+#############################
+
+rgb2Hex <- function(red_base, red_end, green_base, green_end, blue_base, blue_end, points) {
+  colors <- NULL
+  red <- NULL
+  green <- NULL
+  blue <- NULL
+  
+  if(points < 5) {
+    red_base = red_base * .65
+    red_end = red_end * 1.5
+    green_base = green_base * .65
+    green_end = green_end * 1.5
+    blue_base = blue_base * .65
+    blue_end = blue_end * 1.5
+  }
+  
+  for(i in 1:points) {
+    red <- c(red,  (1 - (i-1)/(points-1)  )  * (1 - (-1)^(i*2))/2  +  (i-1)/(points-1) * (1 + (-1)^(i*2))/2  )
+    green <- c(green,  (0.5 - (i-1)/((points-1) *2)  )  * (1 - (-1)^(i*2))/2  +  (0.5 + (i-1)/((points-1) *2)) * (1 + (-1)^(i*2))/2  )
+    blue <- c(blue,  (1 - (i-1)/(points-1)  )  * (1 + (-1)^(i*2))/2  +  (i-1)/(points-1) * (1 - (-1)^(i*2))/2  )
+    colors <- rgb(red,green,blue)
+  }
+  return(colors) 
+}
+
+#############################
+
+break_into_rows <- function(phrase, row_len) {
+  spaces_vector <- str_locate_all(pharse, " ")
+  previous_loop <- 0
+  new_pharse <- ""
+  # Loop over each target line, given by its target length above
+  if(round(nchar(pharse)/row_len) > 0 ) {
+    for(loop_breaks in 1:round(nchar(pharse)/row_len) )  {
+      # Loop over all spaces positions
+      for(loop_spaces in spaces_vector[[1]][,"start"]) {
+        # If space just passed the length of line or achieve the last space position
+        if(loop_spaces > loop_breaks * row_len    ) {
+          # Insert a line break between previous substring in loop with the section for the new line 
+          new_pharse <- paste( new_pharse, substr(pharse,previous_loop + 1 , loop_spaces - 1), sep = "\n"   )
+          # Updates indexes
+          previous_loop <- loop_spaces
+          break
+        }
+      }
+    }
+    
+    # Adds last section of string
+    new_pharse <- paste( new_pharse, substr(pharse, loop_spaces + 1, nchar(pharse)), sep = "\n"  )
+    # Re-assigns to original title
+    new_pharse <- substr(new_pharse, 2, nchar(new_pharse) )
+  }
+  return(new_pharse)
+}
+
+##########################
+# Function to break a phrase in different lines of size close to row_len
+
+break_by_words <- function(phrase, row_len) {
+  # gets a vector of all words contained in the phrase
+  word_vector <- strsplit(phrase, " +")
+  new_line <- 0
+  new_phrase <- ""
+  # Loop over all words in the phrase
+  for(word in word_vector[[1]]) {
+    # If len of new line is smaller than the target line length
+    if(new_line < row_len) {
+      # Adds the new word to the new phrase separated by a space 
+      new_phrase <- paste(new_phrase, word, sep= " ")
+      # Increases the size of the new line
+      new_line <- new_line + nchar(word) 
+    }
+    # If new line becomes larger than the target size
+    else {
+      # Resets size to the length of new word
+      new_line <- nchar(word)
+      # Adds the new word to the new phrase separated by a line break 
+      new_phrase <- paste(new_phrase, word, sep= "\n")
+      
+    }
+  }
+  return(new_phrase)
+}
+
+##########################
+# Function to break a phrase in different lines of size close to row_len
+
+remove_html <- function(label_in) {
+  label_out <- str_remove_all(label_in, "<.*?>")
+  return(label_out)
+  #return(gsub("<.*?>", "", label_in))
+}
+
+##########################
+# Initial values
+##########################
+# server_url <- 'http://10.124.163.238/redcap/api/'
+ server_url <- params$server_url
+
+initial_point_size <- 0.7
+increase_point_size <- 0.1
+
+report_number <- params$reportId
+
+##########################
+ # Project Title
+ ##########################
+ 
+ project_info <- postForm(
+   uri= server_url,
+   token= params$token,
+   content='project',
+   format='csv',
+   returnFormat='csv',
+  .opts = RCurl::curlOptions(ssl.verifypeer = FALSE, ssl.verifyhost = FALSE, verbose=FALSE)
+
+ )
+
+ project_df <- read.csv(text = project_info, header = TRUE, sep = ",", stringsAsFactors = FALSE)           # read project info in csv format
+ 
+
+##########################
+# Data Dictionary
+##########################
+ 
+# Reads a very large string for all dd from REDCap
+dd <- postForm(
+  uri=server_url,
+  token= params$token,
+  content='metadata',
+  format='csv',
+  returnFormat='csv',
+ .opts = RCurl::curlOptions(ssl.verifypeer = FALSE, ssl.verifyhost = FALSE, verbose=FALSE)
+)
+
+dd_df <- read.csv(text = dd, header = TRUE, sep = ",", stringsAsFactors = FALSE)
+
+# # Breaks dd by field in a vector of single, long strings for each field
+# dd_table <- unlist(strsplit(dd, split="\n"))
+dd_len   <- nrow(dd_df)
+
+# Creates empty vectors for each dd component and each field
+field_name_dd <- character(length = dd_len)
+field_type_dd <- character(length = dd_len)
+field_label_dd <- character(length = dd_len)
+text_val_dd <- character(length = dd_len)
+choices_calc_dd <- character(length = dd_len)
+options_label <- matrix(character(), dd_len, 999)
+options_label_short <- matrix(character(), dd_len, 999)
+options_value <- matrix(numeric(), dd_len, 999)
+options_number <- character(length =  dd_len)
+branching_dd <- character(length = dd_len)
+# form_name_dd <- character(length = dd_len)
+# section_header_dd <- character(length = dd_len)
+# fields_other_dd <- character(length = dd_len)
+
+
+# # To read the dd in a line! From Alvaro Ciganda; check last two parameters
+# df_api<-read.table(text = dd, sep =",", header = TRUE, stringsAsFactors = FALSE, as.is = TRUE)
+
+field_name_dd     <- dd_df$field_name
+field_type_dd     <- dd_df$field_type
+field_label_dd    <- dd_df$field_label
+choices_calc_dd   <- dd_df$select_choices_or_calculations
+text_val_dd       <- dd_df$text_validation_type_or_show_slider_number
+choices_calc_len <- length(choices_calc_dd)
+branching_dd   <- dd_df$branching_logic
+# form_name_dd      <- dd_df$form_name
+# section_header_dd <- dd_df$section_header
+# Loop over all fields with options to extract its components
+for(var_dd in 1:dd_len) {
+  # If they have non-empty choices and are radio or drop-down lists or checkboxes
+  if( !is.na(choices_calc_dd[var_dd]) && 
+   (field_type_dd[var_dd] == "radio" || field_type_dd[var_dd] =="dropdown" || field_type_dd[var_dd] == "checkbox") ) {
+    # Removes leading characters and breaks components separated by | into a list
+    # 'gsub' replaces all matches of a string
+    # 'unlist' breaks a string
+    aux <- data.frame( x = gsub("^\\s+|\\s+$", "",unlist(strsplit(choices_calc_dd[var_dd],"|",fixed=TRUE)))   )
+    # 'separate' splits code from label for each option with only the first comma as separator (extra commas are ignored and the rest of the text is merged into the label)
+    aux_options <- aux %>% separate(x, c("code", "label"), sep = ",", extra = "merge")
+    # To remove leading space
+    aux_options$label <- gsub("^\\s", "", aux_options$label)
+    if(!is.na(aux_options$label[1]) || !is.na(aux_options$label[2]) || !is.na(aux_options$label[3])) {
+      options_label[var_dd,1:length(aux_options$label)] <- aux_options$label
+      options_value[var_dd,1:length(aux_options$label)] <- aux_options$code
+      options_number[var_dd] <- length(aux_options$label)
+    }
+  }
+ }
+
+```
+
+
+```{r data_preparation, include=FALSE }
+
+#########################
+# Data Preparation
+#########################
+
+# Preparing message in case there are no graphs displayed
+printed_graphs <- FALSE
+no_graphs <- ""
+
+# Preparing message in case there are no data retrieved
+no_results <- ''
+
+# Reading report from REDCap
+data_report <- postForm(
+  uri=server_url,
+  token=params$token,
+  content='report',
+  format='csv',
+  report_id=report_number,
+  rawOrLabel='raw',
+  rawOrLabelHeaders='raw',
+  exportCheckboxLabel='false',
+  returnFormat='csv',
+ .opts = RCurl::curlOptions(ssl.verifypeer = FALSE, ssl.verifyhost = FALSE, verbose=FALSE)
+)
+
+report_cols_len <- 0
+col_names_report <- ''
+data_report_matrix <- read.csv(text = data_report, header = TRUE, sep = ",", stringsAsFactors = FALSE)
+data_report_size = nrow(data_report_matrix)
+
+data_report_df <- data.frame(data_report_matrix)
+col_names_report_df <- colnames(data_report_df)
+
+#### field_name_dd[3:12] `r field_name_dd[3:12]`
+#### field_type_dd[3:12] `r field_type_dd[3:12]`
+#### field_label_dd `r field_label_dd[3]`
+#### choices_calc_dd `r choices_calc_dd[3]`
+#### text_val_dd `r text_val_dd[3]`
+
+```
+
+```{r filters, include=FALSE }
+
+ ##############################
+ # Live filters implementation
+ ##############################
+
+live_filter <- c(params$dynamic_filter1, params$dynamic_filter2, params$dynamic_filter3)
+live_filter_value <- c(params$lf1, params$lf2, params$lf3)
+
+
+live_filter_num <- length(live_filter)
+filter_title <- c('', '', '')
+filter_value <- c('', '', '')
+
+filters_title <- ''
+
+# Replace selected filter fields by their labels and option names from dd 
+  # For all filters  
+for(i in 1:live_filter_num) {
+  # if live filter is on complete flag for an instrument and it's used
+  if(substr(live_filter[i], nchar(live_filter[i])-8, nchar(live_filter[i])) == '_complete' & live_filter_value[i] != "" ) {
+      filter_title[i] <- substr(live_filter[i], 0, nchar(live_filter[i])-9)
+      # Make form name nicer
+      filter_title[i] <- paste(capitalize(str_replace(filter_title[i], '_', ' ')), "instrument", sep = ' ')
+      if(live_filter_value[i] == 2) filter_value[i] <- 'Complete'
+      else if(live_filter_value[i] == 1) filter_value[i] <- 'Unverified'
+      else if(live_filter_value[i] == 0) filter_value[i] <- 'Incomplete'
+  }
+  else {
+  # loop for all fields in dd
+  for(j in 1:dd_len) {
+      if(live_filter_value[i] != "" & live_filter[i] == field_name_dd[j]) {
+        filter_title[i] <- field_label_dd[j]
+  
+        # Assigns 'blank value' label if empty value is selected
+        if(live_filter_value[i] == "[NULL]" ) filter_value[i] <- "(blank value)"
+        else {
+          if(!isTRUE(options_number[j] == "") ) { 
+            for(k in 1:options_number[j]) {
+              # Selects the corresponding option label to the option value selected
+              if(options_value[j, k] == live_filter_value[i]) filter_value[i] <- options_label[j, k] # removed as.numeric from live_filter_value because codes are not necessarily numbers
+            }
+          }
+        }
+        # break # Can I use this instruction to break the loop in all fields in dd?
+      }
+    }
+  } 
+}
+
+# Put together the filters title
+for(i in 1:live_filter_num) {
+  if(live_filter_value[i] != "" ) {
+    filter_title[i] <- paste(filter_title[i], filter_value[i], sep = ' = ' )
+    filters_title <- 'live filter(s):'
+  }
+}
+```
+
+```{r filtering data, include=FALSE }
+
+##################
+# Filtering data
+##################
+
+ col_names_report_mat <- colnames(data_report_df)
+ col_pos <- c(0,0,0)
+ # Identifying report columns corresponding to live filters
+ for(cont in 1:ncol(data_report_df)) {
+   for(i in 1:live_filter_num) {
+     if(live_filter_value[i] != "" && col_names_report_df[cont]== live_filter[i]) col_pos[i] <- cont
+   }
+ }
+
+ for(i in 1:live_filter_num) {
+   # Subsetting report data according to true live filter values
+   if(live_filter_value[i] != "" & live_filter_value[i] != "[NULL]" & col_pos[1] > 0) 
+     data_report_matrix <- data_report_matrix[data_report_matrix[, col_pos[i]] == live_filter_value[i], ]
+   # Subsetting report data according to live filter values when "(blank value)" has been selected
+   if(live_filter_value[i] == "[NULL]" & col_pos[1] > 0) data_report_matrix <- data_report_matrix[  is.na(data_report_matrix[, col_pos[1]]), ]
+ }
+
+# Set filter expressions for live filters 
+filter_condition <- ""
+  
+
+### Create lcondition for any combination in each live filter
+for(i in 1:live_filter_num) {
+  # If live filter has been selected 
+  if(live_filter_value[i] != "" ) {
+    ## case when previous live filters were selected, adding AND connector
+    if(filter_condition != "") {
+         filter_condition <- paste(filter_condition, ' AND ', sep = '')
+    }
+    # case when filter has been selected to non-blank value
+    if(live_filter_value[i] != "[NULL]" ) filter_condition <- paste(filter_condition, '[' , live_filter[i] , '] = "' ,  live_filter_value[i], '"', sep = '')
+    # case when filter has been selected to blank value
+     else filter_condition <- paste(filter_condition, '[' , live_filter[i] , "] = ''" , sep = '')
+   }
+}
+ 
+ 
+no_record_id_n_filter <- ""
+
+# if record id is in the report and filters are used, it proceed to get the list of records fulfilling the criteria
+if(field_name_dd[1]%in% names(data_report_matrix) && filter_condition != "" ) {
+  # Reading list of filtered records from REDCap
+  data_filter <- postForm(
+    uri=server_url,
+    token=params$token,
+    content='record',
+    fields=field_name_dd[1],
+    format='csv',
+    filterLogic = filter_condition,
+    rawOrLabel='raw',
+    rawOrLabelHeaders='raw',
+    exportCheckboxLabel='false',
+    returnFormat='csv',
+   .opts = RCurl::curlOptions(ssl.verifypeer = FALSE, ssl.verifyhost = FALSE, verbose=FALSE)
+  )
+  
+
+data_filter_matrix <- NULL
+try(data_filter_matrix <- read.csv(text = data_filter, header = TRUE, sep = ",", stringsAsFactors = FALSE), silent = TRUE)
+
+  # Matches the records in the report with the ones in the list of filtered ones
+  data_report_matrix <- merge(data_report_matrix, data_filter_matrix, by= intersect(names(data_report_matrix), names(data_filter_matrix)), all = FALSE)
+
+   if("redcap_repeat_instrument.y"%in% names(data_report_matrix) ) {
+      data_report_matrix <- subset(data_report_matrix, select= -c(redcap_repeat_instrument.y) ) 
+   }
+  if("redcap_repeat_instance.y"%in% names(data_report_matrix) ) {
+      data_report_matrix <- subset(data_report_matrix, select= -c(redcap_repeat_instance.y) ) 
+  }
+   
+  # Rename column to remove the 'x'
+  names(data_report_matrix)[names(data_report_matrix) == "redcap_repeat_instrument.x"] <- "redcap_repeat_instrument"
+  names(data_report_matrix)[names(data_report_matrix) == "redcap_repeat_instance.x"] <- "redcap_repeat_instance"
+}    
+############
+
+ # Subset data to fields that has a non-null record id. It's needed because... is it needed?
+# data_report_matrix <- data_report_matrix[complete.cases(data_report_matrix[ , field_name_dd[1] ]), ]
+
+ data_report_size = nrow(data_report_matrix)
+
+ col_names_report <- colnames(data_report_matrix)
+  report_len <- nrow(data_report_matrix)
+ report_cols_len <- ncol(data_report_matrix)
+
+# If report doesn't have record id and it's using live filters, it cannot select the cases that fulfill the filter criteria
+if(!field_name_dd[1]%in% names(data_report_matrix) && filter_condition != "") {
+  no_record_id_n_filter <- "Plots cannot be presented when there is no record id in the report and at least a live filter has been selected"
+  data_report_size <- 0
+}
+
+#### report_cols_len r report_cols_len`
+
+```
+
+# Advanced Graphs 
+
+# `r project_df$project_title`
+### Number of results returned: `r data_report_size`
+#### `r filters_title`
+#####    `r filter_title[1]`
+#####    `r filter_title[2]`
+#####    `r filter_title[3]`
+
+```{r project_df$project_title , echo=FALSE, fig.height=16, fig.width=18, fig.align="center"}
+
+
+
+
+#########################
+# Network graphs
+#########################
+
+
+# Initial values
+skip_loop <- 0
+count_network <- 0
+title_len <- 50
+x_title_len <- 100
+y_title_len <- 30
+full_line <- 15
+
+# If report has record id or it's not using filters, it can produce the plots
+if(field_name_dd[1]%in% names(data_report_matrix) || filter_condition == "") {
+#} else {
+
+# Loops over all columns in report to create networks
+for(k in 1:report_cols_len) {
+  first_field_report <- 0
+  first_field_dd <- 0
+  second_field_report <- 0
+  second_field_dd <- 0
+  # Skip some loops to prevent printing the same graph several times
+  start_loop <- max(k, skip_loop)
+
+  # Loops over all columns in report, starting from next column to review if it's going to be plotted
+  for(i in start_loop:report_cols_len) {
+    # Loops over all fields in dd to see if they are the correct type and compare field names
+    for(j in 1:dd_len) {
+      # Checks if fields are the plottable type
+      if(field_type_dd[j] == 'text' && is.na(text_val_dd[j]) == FALSE && text_val_dd[j] != "") {
+        # Do nothing
+      }
+      else 
+      if(field_type_dd[j] == 'text' ) {
+        # Checks if there are columns in the report
+        if(( i > 0 )) {
+         # Checks if field name in column and dd are the same
+          if(col_names_report[i] == field_name_dd[j]) {
+            # Assigns second field number if first one has been
+            if(first_field_report > 0 && second_field_report == 0) {
+              second_field_report <- i
+              second_field_dd <- j
+
+            }
+            # Assigns first field number if it hasn't been
+            if(first_field_report == 0) {
+              first_field_report <- i
+              first_field_dd <- j
+            }
+            # Plots network if two fields have been selected
+            if(first_field_report > 0 && second_field_report > 0) {
+              count_network <- count_network + 1
+              cross <- table(data_report_matrix[,first_field_report],
+                             data_report_matrix[,second_field_report])
+
+              ########################
+              ## Align category codes
+              row_labels <- character( length = length(rownames(cross)) )
+              row_found <- 1
+              # for(i_row in rownames(cross)) {
+              #   for(i_find in 1:length(options_value[first_field_dd,])) {
+              #     # First if is to deal with not having selected any option
+              #     if(i_row == "NA") {
+              #       row_labels[row_found] <- "N/A"
+              #       row_found <- row_found + 1
+              #       break
+              #     }
+              #     # If to assign correct label to each selected option in the table
+              #     else if(is.na(options_value[first_field_dd,i_find]) == FALSE
+              #         && is.na(i_row) == FALSE
+              #         && str_trim(options_value[first_field_dd,i_find]) == i_row) {
+              #           #  print (c("options_label[first_field_dd,i_find]",
+              #           # options_label[first_field_dd,i_find]))
+              #           row_labels[row_found] <- options_label[first_field_dd,i_find]
+              #           row_found <- row_found + 1
+              #           break
+              #     }
+              #   }
+              # }
+              # rownames(cross) <- row_labels
+              # 
+              # col_labels <- character( length = length(colnames(cross)) )
+              # col_found <- 1
+              # for(i_col in colnames(cross)) {
+              #   for(i_find in 1:length(options_value[second_field_dd,])) {
+              #     # First if to deal with not selected any option
+              #     if(i_col == "NA") {
+              #       col_labels[col_found] <- "N/A"
+              #       col_found <- col_found + 1
+              #       break
+              #     }
+              #     # If to assign correct label to each selected option in the table
+              #     #else if(as.numeric(options_value[second_field_dd,i_find]) == as.numeric(i_col)) {
+              #     else if(is.na(options_value[second_field_dd,i_find]) == FALSE  && is.na(i_col) == FALSE
+              #     && str_trim(options_value[second_field_dd,i_find]) == i_col) {
+              #       col_labels[col_found] <- options_label[second_field_dd,i_find]
+              #       col_found <- col_found + 1
+              #       break
+              #     }
+              #   }
+              # }
+              # colnames(cross) <- col_labels
+# 
+#               ########################
+#               ########################
+#               # Important instruction!
+#               # It keeps factors and formatting for the table
+#               cross.df <- as.data.frame.matrix(cross)
+#               ########################
+#               ### Network graph
+#               ########################
+
+              # Factor names to include in graphs and maps
+              first_factor = factor(data_report_matrix[,second_field_report])
+              second_factor = factor(data_report_matrix[,first_field_report])
+              cross.table.df <- data.frame(first_factor, second_factor)
+
+              # max_label_size <- 50
+              # # If there is a positive number of options
+              # if(!isTRUE(options_number[second_field_dd] == "") ) {
+              # 
+              #   # Auxilliary vector to reduce label size
+              #   # Copies labels into auxilliary vector
+              #   options_label_short[second_field_dd, ] <- options_label[second_field_dd, ]
+              #   # For each label
+              #   for(t in 1:options_number[second_field_dd] ) {
+              #     # Takes original label size
+              #     # If label is longer than max allowed it truncates it and adds ... at the end
+              #     if(  nchar( options_label[second_field_dd, t])  >   max_label_size  ) {
+              #       options_label_short[second_field_dd, t] <- paste(  
+              #         substr(  options_label[second_field_dd, t], 1, max_label_size), '...')
+              #     }
+              #   }
+              # 
+              #   # Replaces values in options by their label
+              #   first_factor <- mapvalues(first_factor,
+              #                             from = str_trim(options_value[second_field_dd,
+              #                                    1:options_number[second_field_dd] ]),
+              #                             to = options_label_short[second_field_dd,
+              #                                    1:options_number[second_field_dd] ]
+              #   )
+              # }
+# 
+#               # Condition to check that there are options for first field
+#               # (it was throwing a NA/NaN error)
+#               if(isTRUE(options_number[first_field_dd] == "") ) {
+#                 # Do nothing, field has no options
+#               }
+#               # If there is a positive number of options
+#               if(!isTRUE(options_number[first_field_dd] == "") ) {
+# 
+#                 # Auxilliary vector to reduce label size
+#                 # Copies labels into auxilliary vector
+#                 options_label_short[first_field_dd, ] <- options_label[first_field_dd, ]
+#                 # For each label
+#                 for(t in 1:options_number[first_field_dd] ) {
+#                   # Takes original label size
+#                   # If label is longer than max allowed it truncates it and adds ... at the end
+#                   if(  nchar( options_label[first_field_dd, t] ) >   max_label_size  ) {
+#                     options_label_short[first_field_dd, t] <- paste(  substr( 
+#                       options_label[first_field_dd, t], 1, max_label_size), '...')
+#                   }
+#                 }
+# 
+#                 # Replaces values in options by their label
+#                 second_factor <- mapvalues(second_factor,
+#                                            from = str_trim(options_value[first_field_dd,
+#                                                   1:options_number[first_field_dd] ]),
+#                                            to = options_label_short[first_field_dd,
+#                                                   1:options_number[first_field_dd] ]
+#                 )
+#                }
+
+              ## Network graph
+              data_network <- data.frame(first_factor, second_factor)
+              # Selects list of unique values existing in the report for that first field
+              points_unique <- unique(data_report_matrix[,first_field_report])
+
+              graph_title <- paste(field_label_dd[second_field_dd], "vs.",
+                                     field_label_dd[first_field_dd], sep = " ")
+              graph_title <- remove_html(graph_title)
+
+              # if(length(unique(second_factor)) > 25 ) graph_title <-
+              #   break_by_words(graph_title , title_len/2)
+              # else  graph_title <- break_by_words(graph_title , title_len)
+              # 
+              # x_label <- break_by_words(field_label_dd[second_field_dd], x_title_len)
+              # y_label <- break_by_words(field_label_dd[first_field_dd], y_title_len)
+              # too_many_cat_x <- ''
+              # too_many_cat_y <- ''
+              # # Adding warning message if there are too many categories 
+              # # in graph that cause overlapping labels or crowded graphs
+              # if(length(unique(second_factor)) > 34 ) too_many_cat_y <- 
+              #   'Too many categories! try to reduce'
+              # if(length(unique(first_factor)) > 34 ) too_many_cat_x <- 
+              #   '(Too many categories! try to reduce)'
+
+              # legend(x=-1.5, y=-1.1, graph_title, pch=21, col="#777777", pt.bg=colrs, pt.cex=2, cex=.8, bty="n", ncol=1)
+       
+              network <- graph_from_data_frame(data_network, directed = TRUE)
+              plot_network <- plot(network, edge.width = 2,
+                       main = graph_title,
+                       cex.main = 25,
+                       sub = "",
+                       edge.arrow.width = 0.3,
+                       vertex.size = 5,
+                       edge.arrow.size = 0.5,
+                       vertex.size2 = 13,
+                       vertex.label.cex = 1.5,
+                       asp = 0.95,
+                       margin = -0.1)
+
+              # # Workaround to be able to print the table outside the loop
+              # if(count_network==1) plot_network_1_1 <- plot_network
+              # if(count_network==2) plot_network_1_2 <- plot_network
+              # if(count_network==3) plot_network_1_3 <- plot_network
+              # if(count_network==4) plot_network_1_4 <- plot_network
+              # if(count_network==5) plot_network_1_5 <- plot_network
+              # if(count_network==6) plot_network_1_6 <- plot_network
+              # if(count_network==7) plot_network_1_7 <- plot_network
+              # if(count_network==8) plot_network_1_8 <- plot_network
+              # if(count_network==9) plot_network_1_9 <- plot_network
+              # if(count_network==10) plot_network_1_10 <- plot_network
+              # if(count_network==11) plot_network_1_11 <- plot_network
+              # if(count_network==12) plot_network_1_12 <- plot_network
+              # if(count_network==13) plot_network_1_13 <- plot_network
+              # if(count_network==14) plot_network_1_14 <- plot_network
+              # if(count_network==15) plot_network_1_15 <- plot_network
+              # if(count_network==16) plot_network_1_16 <- plot_network
+              # if(count_network==17) plot_network_1_17 <- plot_network
+              # if(count_network==18) plot_network_1_18 <- plot_network
+              # if(count_network==19) plot_network_1_19 <- plot_network
+              # if(count_network==20) plot_network_1_20 <- plot_network
+              # ###############
+
+
+              ######################
+              ######################
+
+              printed_graphs <- TRUE
+              second_field_report <- 0
+              skip_loop <- first_field_report + 1
+            }
+          }
+       }
+      }
+    }
+  }
+} # k loop
+} # record id in the report or no filter applied
+
+```
+
+```{r likert bars , echo=FALSE, out.width = "70%", fig.align="center"}
+
+
+#########################
+# Likert Bars
+#########################
+to_print_likert <- character(length =  4*dd_len) 
+t <- 0
+# If report has record id or it's not using filters, it can produce the plots
+if(field_name_dd[1]%in% names(data_report_matrix) || filter_condition == "") {
+
+  # Removing options "none" and "dissatisfied" (alone)
+  # a is \u00e1;  e is \u00e9;   i  is \u00ed;  o is \u00f3;  u is \u00fa;  n tilde is \u00f1
+  key_likert_words <- c("not useful", "not at all useful", "difficult", "none of my needs", "strongly disagree", "somewhat disagree", "completely disagree", "quite dissatisfied", "very dissatisfied", "Extremely dissatisfied", "poor", "never", "worse", "severely ill", "inutil", "in\u00fatil", "completamente inutil", "completamente in\u00fatil", "dificil", "dif\u00edcil", "ninguna de mis necesidades", "totalmente en desacuerdo", "parcialemnte en desacuerdo", "completamente en desacuerdo", "muy insatisfecho(a)", "totalmente insatisfecho(a)", "nunca", "peor", "gravemente enfermo")
+  
+  # Loops over all key words in key_likert_words
+  for(key_word in 1:length(key_likert_words)) {
+    # print(c("key_likert_words[key_word]: ", key_likert_words[key_word]))
+    likert_field_names <- NULL
+    likert_options <- NULL
+    options_flag = FALSE
+    data_likert = matrix(, nrow = nrow(data_report_matrix), ncol = 0)
+    likert_field_names <- character()
+    j_options_label <- 0
+    opt_labels = 0
+   if(report_len > 0) {  
+    # Loops over all columns in report
+    for(i in 1:report_cols_len) {
+      # Loops over all fields in dd to see if they are the correct type and compare field names
+      for(j in 1:dd_len) {
+        # Checks if fields are the plottable type
+        if(is.na(field_type_dd[j]) == FALSE & (field_type_dd[j] == 'radio' || 
+                                               field_type_dd[j] == 'dropdown')   ) {
+          # Checks if there are columns in the report
+          if(( i > 0 )) {
+            # Checks if field name in column and dd are the same
+            if(col_names_report[i] == field_name_dd[j]) {
+              opt_found <- 1
+              # While there are options?
+              while(is.null(options_label[j,opt_found]) == FALSE && 
+                    is.na(options_label[j,opt_found]) == FALSE) {
+                to_print_likert[t] <- i
+                t <- t + 1
+                to_print_likert[t] <- j
+                t <- t + 1
+                to_print_likert[t] <- options_label[j,1]
+                t <- t + 1
+                to_print_likert[t] <- options_label[j,2]
+                t <- t + 1
+                to_print_likert[t] <- options_label[j,3]
+                t <- t + 1
+                to_print_likert[t] <- "    "
+                t <- t + 1
+                        
+                # Checks if it exists an option label having the key word from the key_likert_words list
+                # parse_character(key_likert_words[key_word], locale=locale(encoding="UTF-8"))
+                #       if(is.na(grepl(tolower(options_label[j,opt_found]),
+                # parse_character(key_likert_words[key_word], 
+                # locale=locale(encoding="UTF-8")))) == FALSE & 
+                #         grepl(parse_character(key_likert_words[key_word],
+                # locale=locale(encoding="UTF-8")),
+                # options_label[j,opt_found], ignore.case = TRUE)   ) {
+                
+                if(is.na(grepl(tolower(options_label[j,opt_found]), 
+                    key_likert_words[key_word])) == FALSE & 
+                    grepl(key_likert_words[key_word], options_label[j,opt_found], ignore.case = TRUE) ) {
+                        # Identifies column in options_label for the first field with the key word
+                        if(j_options_label == 0) j_options_label <- j
+                        # Checks that all options are the same as in the first field 
+                        # identified having the key word 
+                        # in order to add this field to the same likert scale graph
+                        if(   isTRUE(all.equal( options_label[j,1:10], 
+                                                options_label[j_options_label,1:10] ))   )  {
+                          # Once it finds the key word (like "disagree"), 
+                          # it gets all option labels from dd
+                          while(options_flag == FALSE && 
+                                is.na(options_label[j,opt_labels + 1]) == FALSE) {
+                            opt_labels = opt_labels + 1
+                            # Assigns options labels to include in the graph according to their length
+                            if(str_length(options_label[j,opt_labels]) < 26)
+                              likert_options <- cbind(likert_options, options_label[j,opt_labels])
+                            else
+                              likert_options <- cbind(likert_options, 
+                                                paste(substr(options_label[j,opt_labels],  1, 
+                                                min(c(25,str_length(options_label[j,opt_labels])))),
+                                                "...", sep = ""))
+                          }
+                          data_likert <- cbind(data_likert, data_report_matrix[,i])
+                          # Breaks field label into two rows if needed 
+                          # and assigns them to include in the graph
+                          if(str_length(field_label_dd[j]) < 64)
+                            xlabel_j <- break_by_words(  field_label_dd[j],  25   )
+                          else
+                            xlabel_j <- break_by_words( paste (substr(field_label_dd[j],  
+                                                          1, 64), "...", sep = "")  , 26 )
+                              likert_field_names <- cbind(likert_field_names, xlabel_j)
+                        }  # if all options are equal 
+                        # Flag to prevent write options labels more than once
+                        options_flag = TRUE
+                        # Updates position of option with key word
+                        option_w_key_word = opt_found
+                        # Once it finds the key word (like "dissagree"), 
+                        # it doesn't need to go over the rest of the options
+                        break
+                      } # if field has an option with key word
+                      else {
+                        opt_found = opt_found + 1
+                      }
+                  } # while it doesn't find option label equal to key word
+              } # if same column name and dd field 
+           } # if col_names_report not empty
+         } # if radio button or dropdown list
+       } # loop j
+    } # loop i
+   
+    if(opt_labels > 0) {
+       # Assigns colors according to the number of options
+      if(opt_labels == 2) likert_colors <- c('red3', 'forestgreen')
+      if(opt_labels == 3) likert_colors <- c('red3', 'lightgoldenrod', 'forestgreen')
+      if(opt_labels == 4) likert_colors <- c('red3', 'tomato', 'palegreen3', 'forestgreen')
+      if(opt_labels == 5) likert_colors <- c('red3', 'tomato', 'lightgoldenrod', 'palegreen3',
+                                             'forestgreen')
+      if(opt_labels == 6) likert_colors <- c('red3', 'orangered', 'tomato', 'palegreen3', 
+                                             'green',  'forestgreen')
+      if(opt_labels == 7) likert_colors <- c('red3', 'orangered', 'tomato', 'lightgoldenrod', 
+                                             'green',  'palegreen3', 'forestgreen')
+      # If negative key word is in the second half of the vector of options, it reverts colours
+      if(option_w_key_word >= opt_labels/2) {
+        likert_colors <- rev(likert_colors)
+      }
+      likert_colors <- append(likert_colors, 'white', after = length(likert_colors))
+  
+      # Matrix of two columns, first one with field/question numbers and 
+      # second one with likert responses (records are ommitted)
+      likert_in_single_col <- matrix(0,nrow=nrow(data_likert) * (ncol(data_likert)), ncol=2)
+
+      # Converting data_likert into likert_in_single_col
+      for (row_val in 1:nrow(data_likert)) {
+        for (col_val in 1:ncol(data_likert)) {
+          likert_in_single_col[(row_val-1) * (ncol(data_likert) ) + (col_val), 1] = as.numeric(col_val)
+          likert_in_single_col[(row_val-1) * (ncol(data_likert) ) + (col_val), 2] =
+            as.numeric(data_likert[row_val, col_val])
+        }
+      }
+  
+      # Matrix of counts of responses  organized by response options in rows and field/questions in columns
+      likert_pct <- tapply(likert_in_single_col[,2], list(likert_in_single_col[,2], likert_in_single_col[,1]), length)
+  
+      # Replace nulls by zero counts, if not it would cause an error when plotting
+      likert_pct <- replace_na(likert_pct,0)
+  
+      # Matrix of counts of responses organized by field/questions in rows and question number in first column and response options in remaining columns
+      likert_pct_t <- data.frame( cbind(c(1:max(unique(likert_in_single_col[,1]))),t(likert_pct)) )
+  
+      ###
+      # Insert column of zeroes for option not selected in any question/field
+      ###
+      
+      # Initiates vector of positions of missing values according to the array of original options
+      missing_option <- c(rep(NA, nrow(options_value) ) )
+      # sequential value to store each missing option in missing_option vector 
+      miss <- 0
+      # For all options
+      for(k_col in 1:nrow(options_value)   ) { 
+        # If it is not a null option
+        if( !is.na(options_value[j_options_label, k_col]) ) { 
+          # If the option has no values in data_likert
+          if( !options_value[j_options_label, k_col]%in%data_likert) {
+            miss <- miss + 1
+            missing_option[miss] <- k_col 
+          }
+        }
+      }
+      missing_number <- miss
+  
+  
+      # Inserts a column with zeroes in between the appropriate gap into likert_pct_t
+      added_temp_zero <- FALSE
+      if(missing_number > 0) {
+       for (miss_cols in 1:missing_number) {
+          if(missing_option[miss_cols] > 0) {
+            # Gets number of columns in array of likert responses
+            end_col <- ncol(likert_pct_t)
+            if( end_col == 2) {
+              likert_pct_t <- cbind(likert_pct_t, c(rep(0,nrow(likert_pct_t))) )
+              end_col <- ncol(likert_pct_t)
+              added_temp_zero <- TRUE
+            }
+            # Selects position before missing zeroes should be inserted
+            gap <- min( missing_option[miss_cols], end_col)
+            # Selects position rigth after missing zeroes should be inserted
+            gap_plus_1 <- min( gap + 1, end_col)
+            # Insert column of zeroes if missing response is in between
+            if(gap == gap_plus_1) {
+              likert_pct_t <- cbind(likert_pct_t[,1:gap], c(rep(0,nrow(likert_pct_t))) )
+            }
+            # Add column of zeroes at the end if missing response is at the end
+            else {
+              likert_pct_t <- cbind(likert_pct_t[,1:gap], c(rep(0,nrow(likert_pct_t))), likert_pct_t[,gap_plus_1:end_col] )
+            }
+          }
+        }
+      }
+  
+      if(added_temp_zero == TRUE) {
+        likert_pct_t <- likert_pct_t[, 1:end_col]
+        added_temp_zero = FALSE
+      }
+  
+      # Matrix of counts of responses organized by field/questions in rows and response options in columns  (and labels for the graph)
+      graph_likert<- likert_pct_t[,2:ncol(likert_pct_t)]
+  
+      # Assigns options labels to include in the graph
+      colnames(graph_likert) <- likert_options
+      # Assigns field labels to include in the graph
+      row.names(graph_likert) <- likert_field_names
+  
+      # Sort all questions by count value from last, second to last, third to last,... options
+      graph_likert <- dfOrder(graph_likert, ncol(graph_likert):1)
+  
+      print(likert(graph_likert,
+                   main='Likert Scale',
+                   as.percent = TRUE,
+                   col=likert_colors,
+                   horizontal=TRUE,
+                   panel=panel.barchart,
+                   # panel.background = element_rect(size = 2, color = "grey70", fill = NA, height = 5),
+                   xscale.components=xscale.components.top.HH,
+                   yscale.components=yscale.components.right.HH,
+                   xlimEqualLeftRight=FALSE,
+                   xTickLabelsPositive=TRUE,
+                   reverse=FALSE,
+                   xlab = "Percent",
+                   ylab.right = ""
+                   ),
+            height=1,
+            wide=2
+      )
+      # Change printing-any-graph flag to true
+      printed_graphs <- TRUE
+    }
+   }
+  }
+} # if record id in the report or no filter used
+
+```
+
+```{r "scatter plots", echo=FALSE, fig.height=6, fig.width=8, fig.align="center"}
+
+#########################
+# Scatter Plots
+#########################
+
+skip_loop <- 0
+scatter_not_enough_pts <- ""
+date_vector <- NULL
+date_index <- NULL
+
+
+
+# Loops over all columns in report to prepare date fields
+for(k in 1:report_cols_len) {
+  first_field_report <- 0
+  first_field_dd <- 0
+  second_field_report <- 0
+  second_field_dd <- 0
+  # Skip some loops to prevent printing the same graph several times
+  start_loop <- max(k, skip_loop)
+  # Loops over all columns in report, starting from next column to review 
+  # if it's going to be plotted
+  for(i in start_loop:report_cols_len) {
+    # Loops over all fields in dd to see if they are the correct type and compare field names
+    for(j in 1:dd_len) {
+      if( !is.na(text_val_dd[j]) && 
+        field_type_dd[j] == "text" && 
+        substr(text_val_dd[j],1,4) == "date") {
+        # Checks if there are columns in the report
+        if(( i > 0 )) {
+          # Checks if field name in column and dd are the same
+          if(col_names_report[i] == field_name_dd[j]) {
+            # date_vector <- "found"
+            date_vector <- data_report_matrix[,i]
+            date_index <- c(1:nrow(data_report_matrix))
+          }
+        }
+      }
+    }
+  }
+}
+        
+
+# If report has record id or it's not using filters, it can produce the plots
+if(field_name_dd[1]%in% names(data_report_matrix) || filter_condition == "") {
+  # Loops over all columns in report
+  for(k in 1:report_cols_len) {
+    first_field_report <- 0
+    first_field_dd <- 0
+    second_field_report <- 0
+    second_field_dd <- 0
+    # Skip some loops to prevent printing the same graph several times
+    start_loop <- max(k, skip_loop)
+    # Loops over all columns in report, starting from next column 
+    # to review if it's going to be plotted
+    for(i in start_loop:report_cols_len) {
+      # Loops over all fields in dd to see if they are the correct type and compare field names
+       for(j in 1:dd_len) {
+        # Checks if fields are the plottable type
+        if( is.null(field_type_dd[j]) == TRUE || is.na(field_type_dd[j]) == TRUE || 
+          (field_type_dd[j] == 'text' && 
+          (is.null(text_val_dd[j]) == TRUE || is.na(text_val_dd[j]) == TRUE))) {
+          # Do nothing, field not to be consider for this type of graphs
+        }
+        else if( field_type_dd[j] == 'calc' 
+                  ||
+                      (field_type_dd[j] == 'text' && (
+                        text_val_dd[j] == 'integer' ||
+                        substr(text_val_dd[j],1,6) == 'number')
+                       )
+                  ||
+                     (field_type_dd[j] == "text" &&
+                     substr(text_val_dd[j],1,4) == "date")
+            )  {
+          # Checks if there are columns in the report
+          if(( i > 0 )) {
+            # Checks if field name in column and dd are the same
+            if(col_names_report[i] == field_name_dd[j]) {
+              # Assigns second field number if first one has been assigned
+              if(first_field_report > 0 && second_field_report == 0 &&
+                 !grepl('latitude', field_name_dd[j]) && !grepl('longitude', field_name_dd[j]) &&
+                 !grepl('latitud', field_name_dd[j]) && !grepl('longitud', field_name_dd[j])  )
+              {
+                second_field_report <- i
+                second_field_dd <- j
+              }
+              # Assigns first field number if it hasn't been assigned
+              if(first_field_report == 0 &&
+                 !grepl('latitude', field_name_dd[j]) && !grepl('longitude', field_name_dd[j]) &&
+                 !grepl('latitud',  field_name_dd[j]) && !grepl('longitud',  field_name_dd[j]) )
+             {
+                first_field_report <- i
+                first_field_dd <- j
+              }
+              #################################
+              # Plots scaterplot if two fields have been selected
+              xlab_to_plot_date <- ""
+              if(first_field_report > 0 && second_field_report > 0)
+              {
+                # Check if there are values for each field
+                if( !is.na( data_report_matrix[,first_field_report] ) &&
+                    !is.na( data_report_matrix[,second_field_report] ) )
+                {
+                  is_date_first <- FALSE
+                  is_date_second <- FALSE
+                  # Default value for type of line, just a dot
+                  type_line <- "p"
+
+                  # Assigns first report field according to format date or number
+                  if(field_type_dd[first_field_dd] == "text" &&
+                     substr(text_val_dd[first_field_dd],1,4) == "date")
+                  {
+                    data_report_first_field <-
+                      as.Date(data_report_matrix[,first_field_report], "%Y-%m-%d")
+                    # Value for type of line, a segment
+                    type_line <- "l"
+                    # flag for date field
+                    is_date_first <- TRUE
+                  }
+                   else {
+                     data_report_first_field <-
+                       as.numeric(data_report_matrix[,first_field_report])
+                  }
+
+                  # Assigns second report field according to format date or number
+                  if(field_type_dd[second_field_dd] == "text" &&
+                     substr(text_val_dd[second_field_dd],1,4) == "date")
+                  {
+                    data_report_second_field <-
+                      as.Date(data_report_matrix[,second_field_report],
+                              "%Y-%m-%d")
+                    # Value for type of line, a segment
+                    type_line <- "l"
+                    # flag for date field
+                    is_date_second <- TRUE
+                  }
+                  else {
+                    data_report_second_field <-
+                      as.numeric(data_report_matrix[,second_field_report])
+                  }
+
+                  # If second field is dates, it reverses the order of data and labels
+                  if( is_date_second == TRUE) {
+                   points_to_plot_mat <-
+                    data.frame(matrix(c(data_report_second_field,
+                          data_report_first_field,
+                          data_report_second_field),
+                          ncol=3))
+                   xlab_to_plot <- field_label_dd[second_field_dd]
+                   ylab_to_plot <- field_label_dd[first_field_dd]
+                  }
+                  # otherwise, it doesn't reverse the order of data and labels
+                  else {
+                   points_to_plot_mat <-
+                    data.frame(matrix(c(data_report_first_field,
+                          data_report_second_field,
+                          data_report_first_field),
+                          ncol=3))
+                   if( is_date_first == TRUE || is_date_second == TRUE)
+                    xlab_to_plot_date <- ""
+                   else
+                    xlab_to_plot_date <- field_label_dd[first_field_dd]
+                    xlab_to_plot <- field_label_dd[first_field_dd]
+                    ylab_to_plot <- field_label_dd[second_field_dd]
+                  }
+
+                  # Orders rows by first column
+                  points_to_plot <- dfOrder(points_to_plot_mat)
+                  # Check if enough distintic values for each field
+                  if( length(unique(points_to_plot[,1],
+                          incomparables = FALSE )) > 2 )
+                  {
+                    # Assigns third column with point size
+                    # Initiates first point size
+                    points_to_plot[1,3] <- initial_point_size
+                    # Increases point size if it's same value in first field,
+                    # for non-null values
+                    for(h in 2:report_len)
+                    {
+                      if(is.na(points_to_plot[h,1]) == FALSE &&
+                         is.na(points_to_plot[h-1,1]) == FALSE)
+                      {
+                          if(points_to_plot[h,1] == points_to_plot[h-1,1])
+                          {
+                           points_to_plot[h,3] = points_to_plot[h-1,3] +
+                             increase_point_size
+                           }
+                          else {
+                            points_to_plot[h,3] <- initial_point_size
+                          }
+                      }
+                    }
+
+                    # number of lines of margin to be specified on
+                    # the four sides of the plot
+                    # (in the form c(bottom, left, top, right)).
+                    par(mar=c(1,2,2,0)+.1)
+                    par(pin=c(4.7,3.7))
+                    # plot graph
+                    plot(points_to_plot[,1], points_to_plot[,2],
+                         main= paste(xlab_to_plot, "vs", ylab_to_plot),
+                         xlab=xlab_to_plot_date,  # theme(axis.text.x = element_text(angle = 60, hjust = 1)),
+                         ylab=ylab_to_plot,
+                         type = type_line,
+                         xaxt = "n",
+                         yaxt = "n",
+                         cex= points_to_plot[,3], pch=19, col="blue"
+                    )
+                    # Plots points
+                    points(points_to_plot[,1], points_to_plot[,2])
+                    text(points_to_plot[,1]+ 4,
+                         points_to_plot[,2]- 4,
+                         points_to_plot[,2],
+                         col = "blue",
+                         cex = 0.75)
+                    # Formatting axes according to be date or numeric
+                    if( is_date_first == TRUE && is_date_second == TRUE) {
+                      axis.Date(side = 2, data_report_first_field,
+                              format = "%d %b %y", labels = TRUE, las = 1)
+                      axis.Date(side = 1, data_report_second_field,
+                              format = "%d %b %y", labels = TRUE, las = 2)
+                    }
+                    else if( is_date_second == TRUE ) {
+                      axis.Date(side = 1, data_report_second_field,
+                              format = "%d %b %y", labels = TRUE, las = 2)
+                      axis(side = 2, labels = TRUE, las = 1)
+                    }
+                    else if( is_date_first == TRUE ) {
+                      axis.Date(side = 1, data_report_first_field,
+                              format = "%d %b %y", labels = TRUE, las = 2)
+                      axis(side = 2, labels = TRUE, las = 1)
+                    }
+                    else {
+                      axis(side = 1, labels = TRUE, las = 1)
+                      axis(side = 2, labels = TRUE, las = 1)
+                    }
+
+                    # Add regression line (y~x)
+                    # abline(lm(points_to_plot[,2]~points_to_plot[,1]), col="red")
+                   }
+                   else {
+                     scatter_not_enough_pts <-
+                       "There are not enough distinct points to print (all) scatterplots"
+                   }
+
+                   # Change printing any graph flag to true
+                   printed_graphs <- TRUE
+                   second_field_report <- 0
+                   skip_loop <- first_field_report + 1
+                }
+                else
+                {
+                  scatter_not_enough_pts <-
+                    "At least one field has no points to print a scatterplot"
+                }
+              }
+            }
+          }
+        }
+       }
+     }
+  }
+}
+```
+
+```{r bar graphs , echo=FALSE, out.width = "90%", fig.align="center"}
+
+
+#########################################
+#####  Bar Graphs for Checkbox, radio and dropdown fields
+#########################################
+# Initial values
+count_table <- 0
+title_len <- 50
+x_title_len <- 100
+full_line <- 15
+other_print <- matrix(character(), report_cols_len, 100)
+number_others <- rep(1, report_cols_len)
+other_summary <- NULL
+other_summary_1 <- NULL
+other_summary_2 <- NULL
+other_summary_3 <- NULL
+other_summary_4 <- NULL
+other_summary_5 <- NULL
+other_summary_6 <- NULL
+other_summary_7 <- NULL
+other_summary_8 <- NULL
+other_summary_9 <- NULL
+other_summary_10 <- NULL
+other_summary_11 <- NULL
+other_summary_12 <- NULL
+other_summary_13 <- NULL
+other_summary_14 <- NULL
+other_summary_15 <- NULL
+other_summary_16 <- NULL
+other_summary_17 <- NULL
+other_summary_18 <- NULL
+other_summary_19 <- NULL
+other_summary_20 <- NULL
+found_condition_index <- 0
+# If report has record id or it's not using filters, it can produce the plots
+if(field_name_dd[1]%in% names(data_report_matrix) || filter_condition == "") {
+  field_report <- 0
+  field_dd <- 0
+    # Loop over all fields in dd to see if they are the correct type and compare field name
+    for(j in 1:dd_len) {
+      checkbox_selected <- FALSE
+      # other_summary <- NULL
+      # Loop over all columns in report
+      for(i in 1:report_cols_len) {
+        # Checks if field are the plottable type
+        
+        # #####################################
+        # #####  Checkbox fields
+        # #####################################
+
+        if(field_type_dd[j] == 'checkbox') {
+          # Checks that report is not using the combined checkbox responses in one column
+          if(col_names_report[i] != field_name_dd[j]) {
+  
+        # Checks if field name in column and dd are the same, 
+        # considering that for checkboxes REDCap adds a postfix like '___1'
+        # and it's the first field of the series of those for the same checkbox
+        if(substring(col_names_report[i], 1, nchar(field_name_dd[j])) == field_name_dd[j] &&
+           checkbox_selected == FALSE)  
+           {
+            checkbox_selected <- TRUE
+            # Assigns field indexes
+            field_report <- i
+            field_dd <- j
+            count_table <- count_table + 1
+            # print(c("count_table in checkbox", count_table))
+            # print(c("field_name_dd[j] in checkbox", field_name_dd[j]))
+            # print(c("field_report in checkbox", field_report))
+            opt_labels = 0
+            option_other_value <- 0
+            # option_other = 0
+            # option_other_field = ''
+            # Gets number of options to include in the graph
+            while( is.na(options_label[field_dd, opt_labels + 1]) == FALSE) {
+              opt_labels = opt_labels + 1
+              if(options_label[field_dd, opt_labels] == "Other") {
+                # assign value if there is option "Other"
+                option_other_value <- options_value[field_dd, opt_labels]
+                branching_condition <- 
+                  paste("[", field_name_dd[field_dd], "(", option_other_value, ")] = '1'", sep = '')  
+                found_condition <- grep(branching_condition, branching_dd, value = T)
+                 cond <- paste("", field_name_dd[field_dd], ".",option_other_value, sep='')
+                 found_condition <- grep(cond, branching_dd, value = T) 
+                 found_condition_index <- grep(cond, branching_dd, value = F)
+              }
+
+            }
+            # 
+            # Loop around all columns in report
+            for(r in 1:report_cols_len) {
+              # If finds field in dd for the "Other" column in report, it prints the text
+              if(found_condition_index > 0 && col_names_report[r] == field_name_dd[found_condition_index]) {
+                number_others[count_table] <- length(stri_remove_empty(data_report_matrix[,r]))
+                 others_list <- stri_remove_empty(data_report_matrix[,r], TRUE) 
+                for(other_loop in 1:number_others[count_table]) {
+                  other_print[count_table,other_loop] <- others_list[other_loop]
+                }
+                # Creates a nicely formatted table and allows to add a title to the table
+                other_print_df <- data.frame(other_print[count_table,])
+                colnames(other_print_df) <- field_label_dd[found_condition_index]
+                col_names_check <- colnames(other_print_df)
+                first_col_name <- other_print_df[, 1]
+                if(col_names_check == "Please describe other")
+                  other_summary <- formattable(na.omit(other_print_df), align = c("l"), 
+                      list(`Please describe other` = formatter("span", 
+                      style = x ~ style(display = "block", "background-color" = "#E5E7E9"))))
+
+                else if(col_names_check == "Please describe")
+                  other_summary <- formattable(na.omit(other_print_df), align = c("l"),
+                      list(`Please describe` = formatter("span", 
+                      style = x ~ style(display = "block", "background-color" = "#E5E7E9"))))
+
+                else if(col_names_check == "Describe Other")
+                  other_summary <- formattable(na.omit(other_print_df), align = c("l"),
+                      list(`Describe other` = formatter("span", 
+                      style = x ~ style(display = "block", "background-color" = "#E5E7E9"))))
+
+                else if(col_names_check == "Other")
+                  other_summary <-  formattable(na.omit(other_print_df), align = c("l"),
+                      list(`Other` = formatter("span", 
+                      style = x ~ style(display = "block", "background-color" = "#E5E7E9"))))
+                # Options in Spanish
+                else if(col_names_check == "Por favor describa otro")
+                  other_summary <- formattable(na.omit(other_print_df), align = c("l"), 
+                      list(`Por favor describa otro` = formatter("span", 
+                      style = x ~ style(display = "block", "background-color" = "#E5E7E9"))))
+
+                else if(col_names_check == "Por favor describa")
+                  other_summary <- formattable(na.omit(other_print_df), align = c("l"),
+                      list(`Por favor describa` = formatter("span", 
+                      style = x ~ style(display = "block", "background-color" = "#E5E7E9"))))
+
+                else if(col_names_check == "Describa otro")
+                  other_summary <- formattable(na.omit(other_print_df), align = c("l"),
+                      list(`Describa otro` = formatter("span", 
+                      style = x ~ style(display = "block", "background-color" = "#E5E7E9"))))
+
+                else if(col_names_check == "Otro")
+                  other_summary <-  formattable(na.omit(other_print_df), align = c("l"),
+                      list(`Otro` = formatter("span", 
+                      style = x ~ style(display = "block", "background-color" = "#E5E7E9"))))
+                else if(col_names_check == "Por favor describa otra")
+                  other_summary <- formattable(na.omit(other_print_df), align = c("l"), 
+                      list(`Por favor describa otra` = formatter("span", 
+                      style = x ~ style(display = "block", "background-color" = "#E5E7E9"))))
+
+                else if(col_names_check == "Describa otra")
+                  other_summary <- formattable(na.omit(other_print_df), align = c("l"),
+                      list(`Describa otra` = formatter("span", 
+                      style = x ~ style(display = "block", "background-color" = "#E5E7E9"))))
+
+                else if(col_names_check == "Otra")
+                  other_summary <-  formattable(na.omit(other_print_df), align = c("l"),
+                      list(`Otra` = formatter("span", 
+                      style = x ~ style(display = "block", "background-color" = "#E5E7E9"))))
+              }
+            }
+
+            # Replaces '1's by their option value and assigns 0s as NA
+            # in order to prepare to stack values
+            # if(opt_labels > 0)
+            for(check_options in 1:opt_labels) {
+              data_report_matrix[,field_report + check_options - 1][data_report_matrix[,field_report + check_options - 1] == 1] <- options_value[field_dd,check_options]
+              data_report_matrix[,field_report + check_options - 1][data_report_matrix[,field_report + check_options - 1] == 0] <- NA
+            }
+            # Stack in a list all non-NA options in a list
+            data_rep_mat_stacked <- stack(data_report_matrix[,field_report:(field_report+opt_labels-1)])
+            # Factor names to include in graph
+            field_report_factors = factor(na.omit(data_rep_mat_stacked[,1]))
+            cross.table.df <- data.frame(field_report_factors)
+            max_label_size <- 50
+            # If there is a positive number of options
+            if(!isTRUE(options_number[field_dd] == "") ) {
+              # Auxilliary vector to reduce label size
+              # Copies labels into auxilliary vector
+              options_label_short[field_dd, ] <- options_label[field_dd, ]
+              # For each label
+              for(t in 1:options_number[field_dd] ) {
+                # Takes original label size
+                # If label is longer than max allowed it truncates it and adds ... at the end
+                if(  nchar( options_label[field_dd, t]) > max_label_size) {
+                  options_label_short[field_dd, t] <-
+                    paste(  substr(  options_label[field_dd, t], 1, max_label_size), '...')
+                }
+              }
+              # Replaces values in options by their label
+              field_report_factors <- mapvalues(field_report_factors,
+                                        from = str_trim(options_value[field_dd,
+                                               1:options_number[field_dd] ]),
+                                        to = options_label_short[field_dd,
+                                               1:options_number[field_dd] ]
+              )
+            }
+            data_w_legend <- data.frame(field_report_factors)
+            # Increases max value in frequencies to provide space for value labels in graph
+            max_y <- ceiling(max(count(data_w_legend)$freq)*1.1)
+            # min_y <- floor(min(count(data_w_legend)$freq)*1.1)
+            graph_title <- field_label_dd[field_dd]
+            graph_title <- remove_html(graph_title)
+            if(length(graph_title) > 60 )
+              graph_title <- break_by_words(graph_title , title_len/2)
+            else
+            graph_title <- break_by_words(graph_title , title_len)
+
+            x_label <- break_by_words(remove_html(field_label_dd[field_dd]), x_title_len)
+            # Rotation angle, vertical justification, font size for x axe and legend
+            angle_rotation = 45
+            vertical_just = 0.5
+            x_size = 8
+            legend_size = 7
+            # Number of factors is the number of bars in the graph
+            n_bars = nlevels(field_report_factors) 
+            # If too many bars, adjusts x labels parameters
+            if(n_bars > 25) {
+              angle_rotation = 90
+              vertical_just = 0
+            }
+ 
+            # Bar graph with legend and single field in x axe and counts in y axe
+            # and several aestetics components
+            plot_levels <- ggplot(data=data_w_legend, 
+              aes(x=field_report_factors))  +
+              geom_bar(color="black", fill= getPalette(n_bars)) +
+              ggtitle(graph_title) +
+              xlab("") +
+              ylab("Count") +
+              lims(y = c(0, max_y)) +
+              guides(fill=guide_legend(title='')) +
+              theme(panel.border = element_rect(linetype = "blank", size= 0.9, fill = NA),
+                    plot.title = element_text(hjust = 0.25),
+                    plot.margin = margin(full_line,full_line,full_line,full_line),
+                    axis.title.x = element_text(size=x_size),
+                    axis.text.x = element_text(size=x_size,
+                    angle = angle_rotation,
+                    vjust = vertical_just,
+                    colour = "black"),
+                    axis.title.y = element_text(size=10,
+                     colour = "black"),
+                    legend.position = "bottom",
+                    legend.box = "horizontal"
+                   ) +
+            # Depending on the number of bars, labels are counts only or counts/percentages
+            if(n_bars > 12 )
+              geom_text(aes(label=..count..), stat='count', vjust=-0.5, size = 3)
+            else if(n_bars > 7 )
+              geom_text(aes(label=paste(..count..," (",scales::percent(..count../sum(..count..)),")")),
+              stat='count', vjust=-0.5, size = 3)
+            else 
+              geom_text(aes(label=paste(..count..," (",scales::percent(..count../sum(..count..)),")")),
+              stat='count', vjust=-0.5)
+            # Prints text from "Other" option field
+            field_report <- 0
+            } # substring(col_names_report[i]
+          }
+          # TODO: Build graph when checkbox responses are combined in one column
+          else {
+            
+          }
+        } # checkbox
+
+        # #######################################
+        # #####  Radio button or Dropdown fields
+        # #######################################
+
+        if(field_type_dd[j] == 'radio' || field_type_dd[j] == 'dropdown') {
+         # Checks if field name in column and dd are the same
+          if(col_names_report[i] == field_name_dd[j]) {
+            # Assigns field indexes
+            if(field_report == 0) {
+              field_report <- i
+              field_dd <- j
+            }
+            # Else, it starts plotting procedure
+            count_table <- count_table + 1
+
+              # Factor names to include in graph
+              field_report_factors = factor(data_report_matrix[,field_report])
+              cross.table.df <- data.frame(field_report_factors)
+              max_label_size <- 50
+              # If there is a positive number of options
+              if(!isTRUE(options_number[field_dd] == "") ) {
+                # Auxilliary vector to reduce label size
+                # Copies labels into auxilliary vector
+                options_label_short[field_dd, ] <- options_label[field_dd, ]
+                # For each label
+                for(t in 1:options_number[field_dd] ) {
+                  # Takes original label size
+                  # If label is longer than max allowed it truncates it and adds ... at the end
+                  if(  nchar( options_label[field_dd, t])  >   max_label_size  ) {
+                    options_label_short[field_dd, t] <-
+                      paste(  substr(  options_label[field_dd, t], 1, max_label_size), '...')
+                  }
+                }
+                # Replaces values in options by their label
+                field_report_factors <- mapvalues(field_report_factors,
+                                          from = str_trim(options_value[field_dd,
+                                                 1:options_number[field_dd] ]),
+                                          to = options_label_short[field_dd,
+                                                 1:options_number[field_dd] ]
+                )
+              }
+
+              data_w_legend <- data.frame(field_report_factors)
+              # Increases max value in frequencies to provide space for value labels in graph
+              max_y <- ceiling(max(count(data_w_legend)$freq)*1.1)
+              graph_title <- field_label_dd[field_dd]
+              graph_title <- remove_html(graph_title)
+              #graph_title <- str_remove_all(graph_title, "e")
+              if(length(graph_title) > 60 )
+                graph_title <- break_by_words(graph_title , title_len/2)
+              else
+                graph_title <- break_by_words(graph_title , title_len)
+
+              x_label <- break_by_words(remove_html(field_label_dd[field_dd]), x_title_len)
+              # Rotation angle, vertical justification, font size for x axe and legend
+              angle_rotation = 45
+              vertical_just = 0.5
+              x_size = 8
+              legend_size = 7
+              # Number of factors 
+              n_bars = nlevels(field_report_factors)
+              # Plus one if there are any NAs
+              if (any(is.na(data_w_legend))) n_bars = n_bars + 1
+              # If too many bars, adjusts x labels parameters
+              if(n_bars > 34 ) {
+                angle_rotation = 90
+                vertical_just = 0
+              }
+              # Bar graph with legend and single field in x axe and counts in y axe
+              # and several aestetics components
+              plot_levels <- ggplot(data=data_w_legend, aes(x=field_report_factors))  +
+                geom_bar(color="black", fill= getPalette(n_bars)) +
+                ggtitle(graph_title) +
+                xlab("") +
+                ylab("Count") +
+                lims(y = c(0, max_y)) +
+                guides(fill=guide_legend(title='')) +
+                theme(panel.border = 
+                      element_rect(linetype = "blank", size= 0.9, fill = NA),
+                      plot.title = element_text(hjust = 0.25),
+                      plot.margin = margin(full_line,full_line,full_line,full_line),
+                      axis.title.x = element_text(size=x_size),
+                      axis.text.x = element_text(size=x_size,
+                      angle = angle_rotation,
+                      vjust = vertical_just,
+                      colour = "black"),
+                      axis.title.y = element_text(size=10,
+                      colour = "black"),
+                       legend.position = "bottom",
+                      legend.box = "horizontal"
+                     ) +
+              # Depending on the number of bars, labels are counts only or
+              # counts/percentages
+              if(n_bars > 12 )
+                geom_text(aes(label=..count..), stat='count', vjust=-0.5, size = 3)
+              else if(n_bars > 7 )
+                geom_text(aes(label=paste(..count..," (",scales::percent(..count../sum(..count..)),")")),
+                stat='count', vjust=-0.5, size = 3)
+              else
+                geom_text(aes(label=paste(..count..," (",scales::percent(..count../sum(..count..)),")")),
+                stat='count', vjust=-0.5)
+              # print(c("count_table", count_table))
+
+              field_report <- 0
+            } # col_names_report[i]
+          } # dropdown
+        
+          # Workaround to be able to print the table outside the loop
+          if(count_table==1) plot_levels_1_1 <- plot_levels
+          if(count_table==2) plot_levels_1_2 <- plot_levels
+          if(count_table==3) plot_levels_1_3 <- plot_levels
+          if(count_table==4) plot_levels_1_4 <- plot_levels
+          if(count_table==5) plot_levels_1_5 <- plot_levels
+          if(count_table==6) plot_levels_1_6 <- plot_levels
+          if(count_table==7) plot_levels_1_7 <- plot_levels
+          if(count_table==8) plot_levels_1_8 <- plot_levels
+          if(count_table==9) plot_levels_1_9 <- plot_levels
+          if(count_table==10) plot_levels_1_10 <- plot_levels
+          if(count_table==11) plot_levels_1_11 <- plot_levels
+          if(count_table==12) plot_levels_1_12 <- plot_levels
+          if(count_table==13) plot_levels_1_13 <- plot_levels
+          if(count_table==14) plot_levels_1_14 <- plot_levels
+          if(count_table==15) plot_levels_1_15 <- plot_levels
+          if(count_table==16) plot_levels_1_16 <- plot_levels
+          if(count_table==17) plot_levels_1_17 <- plot_levels
+          if(count_table==18) plot_levels_1_18 <- plot_levels
+          if(count_table==19) plot_levels_1_19 <- plot_levels
+          if(count_table==20) plot_levels_1_20 <- plot_levels
+          if(checkbox_selected == TRUE) {
+            if(count_table==1) other_summary_1 <- other_summary
+            if(count_table==2) other_summary_2 <- other_summary
+            if(count_table==3) other_summary_3 <- other_summary
+            if(count_table==4) other_summary_4 <- other_summary
+            if(count_table==5) other_summary_5 <- other_summary
+            if(count_table==6) other_summary_6 <- other_summary
+            if(count_table==7) other_summary_7 <- other_summary
+            if(count_table==8) other_summary_8 <- other_summary
+            if(count_table==9) other_summary_9 <- other_summary
+            if(count_table==10) other_summary_10 <- other_summary
+            if(count_table==11) other_summary_11 <- other_summary
+            if(count_table==12) other_summary_12 <- other_summary
+            if(count_table==13) other_summary_13 <- other_summary
+            if(count_table==14) other_summary_14 <- other_summary
+            if(count_table==15) other_summary_15 <- other_summary
+            if(count_table==16) other_summary_16 <- other_summary
+            if(count_table==17) other_summary_17 <- other_summary
+            if(count_table==18) other_summary_18 <- other_summary
+            if(count_table==19) other_summary_19 <- other_summary
+            if(count_table==20) other_summary_20 <- other_summary
+          }
+      }
+  }
+} # record id in the report or no filter applied
+
+test_width = "100%"
+if(count_table>=1)  { printed_graphs <- TRUE }
+
+if(report_len > 0 & count_table>=1) plot_levels_1_1
+if(is.null(other_summary_1) == FALSE ) other_summary_1
+if(report_len > 0 & count_table>=2) plot_levels_1_2
+if(is.null(other_summary_2) == FALSE ) other_summary_2
+if(report_len > 0 & count_table>=3) plot_levels_1_3
+if(is.null(other_summary_3) == FALSE) other_summary_3
+if(report_len > 0 & count_table>=4)  plot_levels_1_4
+if(is.null(other_summary_4) == FALSE ) other_summary_4
+if(report_len > 0 & count_table>=5)  plot_levels_1_5
+if(is.null(other_summary_5) == FALSE ) other_summary_5
+if(report_len > 0 & count_table>=6)  plot_levels_1_6
+if(is.null(other_summary_6) == FALSE ) other_summary_6
+if(report_len > 0 & count_table>=7)  plot_levels_1_7
+if(is.null(other_summary_7) == FALSE ) other_summary_7
+if(report_len > 0 & count_table>=8)  plot_levels_1_8
+if(is.null(other_summary_8) == FALSE ) other_summary_8
+if(report_len > 0 & count_table>=9)  plot_levels_1_9
+if(is.null(other_summary_9) == FALSE ) other_summary_9
+if(report_len > 0 & count_table>=10) plot_levels_1_10
+if(is.null(other_summary_10) == FALSE ) other_summary_10
+if(report_len > 0 & count_table>=11) plot_levels_1_11
+if(is.null(other_summary_11) == FALSE ) other_summary_11
+if(report_len > 0 & count_table>=12) plot_levels_1_12
+if(is.null(other_summary_12) == FALSE) other_summary_12
+if(report_len > 0 & count_table>=13) plot_levels_1_13
+if(is.null(other_summary_13) == FALSE) other_summary_13
+if(report_len > 0 & count_table>=14) plot_levels_1_14
+if(is.null(other_summary_14) == FALSE) other_summary_14
+if(report_len > 0 & count_table>=15) plot_levels_1_15
+if(is.null(other_summary_15) == FALSE) other_summary_15
+if(report_len > 0 & count_table>=16) plot_levels_1_16
+if(is.null(other_summary_16) == FALSE) other_summary_16
+if(report_len > 0 & count_table>=17) plot_levels_1_17
+if(is.null(other_summary_17) == FALSE) other_summary_17
+if(report_len > 0 & count_table>=18) plot_levels_1_18
+if(is.null(other_summary_18) == FALSE) other_summary_18
+if(report_len > 0 & count_table>=19) plot_levels_1_19
+if(is.null(other_summary_19) == FALSE) other_summary_19
+if(report_len > 0 & count_table>=20) plot_levels_1_20
+if(is.null(other_summary_20) == FALSE) other_summary_20
+
+
+```
+
+
+```{r cross tabs , echo=FALSE, out.width = "90%", fig.align="center"}
+
+#########################
+# Cross Tabulations and Stacked bars
+#########################
+
+# Initial values
+skip_loop <- 0
+count_table <- 0
+title_len <- 50
+x_title_len <- 100
+y_title_len <- 30
+full_line <- 15
+
+# If report has record id or it's not using filters, it can produce the plots
+if(field_name_dd[1]%in% names(data_report_matrix) || filter_condition == "") {
+#} else {
+
+# Loops over all columns in report to create basic cross tabulations
+for(k in 1:report_cols_len) {
+  first_field_report <- 0
+  first_field_dd <- 0
+  second_field_report <- 0
+  second_field_dd <- 0
+  # Skip some loops to prevent printing the same graph several times
+  start_loop <- max(k, skip_loop)
+  
+  # Loops over all columns in report, starting from next column to review if it's going to be plotted
+  for(i in start_loop:report_cols_len) {
+    # Loops over all fields in dd to see if they are the correct type and compare field names
+    for(j in 1:dd_len) {
+      # Checks if fields are the plottable type 
+      if(field_type_dd[j] == 'radio' || field_type_dd[j] == 'dropdown') {
+        # Checks if there are columns in the report
+        if(( i > 0 )) {
+         # Checks if field name in column and dd are the same
+          if(col_names_report[i] == field_name_dd[j]) {
+            # Assigns second field number if first one has been
+            if(first_field_report > 0 && second_field_report == 0) {
+              second_field_report <- i
+              second_field_dd <- j
+              
+            }
+            # Assigns first field number if it hasn't been
+            if(first_field_report == 0) {
+              first_field_report <- i
+              first_field_dd <- j
+            }
+            # Plots scaterplot if two fields have been selected
+            if(first_field_report > 0 && second_field_report > 0) {
+              count_table <- count_table + 1
+              cross <- table(data_report_matrix[,first_field_report], data_report_matrix[,second_field_report])
+
+              ########################
+              ## Align category codes
+              row_labels <- character( length = length(rownames(cross)) )
+              row_found <- 1
+              for(i_row in rownames(cross)) {
+                for(i_find in 1:length(options_value[first_field_dd,])) {
+                  # First if is to deal with not having selected any option
+                  if(i_row == "NA") {
+                    row_labels[row_found] <- "N/A"
+                    row_found <- row_found + 1
+                    break
+                  }
+                  # If to assign correct label to each selected option in the table
+                  else if(is.na(options_value[first_field_dd,i_find]) == FALSE  && is.na(i_row) == FALSE
+                    && str_trim(options_value[first_field_dd,i_find]) == i_row) {
+                    #  print (c("options_label[first_field_dd,i_find]", options_label[first_field_dd,i_find]))
+                    row_labels[row_found] <- options_label[first_field_dd,i_find]
+                    row_found <- row_found + 1
+                    break
+                  }
+                }
+              }
+              rownames(cross) <- row_labels
+
+              col_labels <- character( length = length(colnames(cross)) )
+              col_found <- 1
+              for(i_col in colnames(cross)) {
+                for(i_find in 1:length(options_value[second_field_dd,])) {
+                  # First if to deal with not selected any option
+                  if(i_col == "NA") {
+                    col_labels[col_found] <- "N/A"
+                    col_found <- col_found + 1
+                    break
+                  }
+                  # If to assign correct label to each selected option in the table
+                  #else if(as.numeric(options_value[second_field_dd,i_find]) == as.numeric(i_col)) {
+                  else if(is.na(options_value[second_field_dd,i_find]) == FALSE  && is.na(i_col) == FALSE 
+                  && str_trim(options_value[second_field_dd,i_find]) == i_col) {
+                    col_labels[col_found] <- options_label[second_field_dd,i_find]
+                    col_found <- col_found + 1
+                    break
+                  }
+                }
+              }
+              colnames(cross) <- col_labels
+
+              ########################
+              ########################
+              # Important instruction!
+              # It keeps factors and formatting for the table
+              cross.df <- as.data.frame.matrix(cross)
+              # Creates a nicely formatted table and allows to add a title to the table
+              cross_output_label <- remove_html(paste("__",field_label_dd[second_field_dd], " (cols) vs. ",
+                                          field_label_dd[first_field_dd]," (rows)__", sep = ""))
+              cross_output <- formattable(cross.df, caption=cross_output_label, align = c("c") )
+              ########################
+              ########################
+              
+             # Workaround to be able to print the table outside the loop
+              if(count_table==1) cross_output_1 <- cross_output
+              if(count_table==2) cross_output_2 <- cross_output
+              if(count_table==3) cross_output_3 <- cross_output
+              if(count_table==4) cross_output_4 <- cross_output
+              if(count_table==5) cross_output_5 <- cross_output
+              if(count_table==6) cross_output_6 <- cross_output
+              if(count_table==7) cross_output_7 <- cross_output
+              if(count_table==8) cross_output_8 <- cross_output
+              if(count_table==9) cross_output_9 <- cross_output
+              if(count_table==10) cross_output_10 <- cross_output
+              if(count_table==11) cross_output_11 <- cross_output
+              if(count_table==12) cross_output_12 <- cross_output
+              if(count_table==13) cross_output_13 <- cross_output
+              if(count_table==14) cross_output_14 <- cross_output
+              if(count_table==15) cross_output_15 <- cross_output
+              if(count_table==16) cross_output_16 <- cross_output
+              if(count_table==17) cross_output_17 <- cross_output
+              if(count_table==18) cross_output_18 <- cross_output
+              if(count_table==19) cross_output_19 <- cross_output
+              if(count_table==20) cross_output_20 <- cross_output
+              ########################
+              ### Stacked graph bars
+              #########################
+
+              # Factor names to include in graphs and maps
+              first_factor = factor(data_report_matrix[,second_field_report])
+              second_factor = factor(data_report_matrix[,first_field_report])
+              cross.table.df <- data.frame(first_factor, second_factor)
+              
+              max_label_size <- 50
+              # If there is a positive number of options
+              if(!isTRUE(options_number[second_field_dd] == "") ) { 
+
+                # Auxilliary vector to reduce label size
+                # Copies labels into auxilliary vector
+                options_label_short[second_field_dd, ] <- options_label[second_field_dd, ]
+                # For each label
+                for(t in 1:options_number[second_field_dd] ) {
+                  # Takes original label size
+                  # If label is longer than max allowed it truncates it and adds ... at the end
+                  if(  nchar( options_label[second_field_dd, t])  >   max_label_size  ) {
+                    options_label_short[second_field_dd, t] <- 
+                      paste(  substr(  options_label[second_field_dd, t], 1, max_label_size), '...')
+                  }
+                }
+
+                # Replaces values in options by their label
+                first_factor <- mapvalues(first_factor, 
+                                          from = str_trim(options_value[second_field_dd, 
+                                                 1:options_number[second_field_dd] ]), 
+                                          to = options_label_short[second_field_dd, 
+                                                 1:options_number[second_field_dd] ] 
+                )
+              }
+
+              # Condition to check that there are options for first field (was throwing a NA/NaN error)
+              if(isTRUE(options_number[first_field_dd] == "") ) { 
+              }
+              # If there is a positive number of options
+              if(!isTRUE(options_number[first_field_dd] == "") ) { 
+
+                # Auxilliary vector to reduce label size
+                # Copies labels into auxilliary vector
+                options_label_short[first_field_dd, ] <- options_label[first_field_dd, ]
+                # For each label
+                for(t in 1:options_number[first_field_dd] ) {
+                  # Takes original label size
+                  # If label is longer than max allowed it truncates it and adds ... at the end
+                  if(  nchar( options_label[first_field_dd, t] ) >   max_label_size  ) {
+                    options_label_short[first_field_dd, t] <- 
+                      paste(  substr(  options_label[first_field_dd, t], 1, max_label_size), '...')
+                  }
+                }
+
+                # Replaces values in options by their label
+                second_factor <- mapvalues(second_factor, 
+                                           from = str_trim(options_value[first_field_dd,
+                                                  1:options_number[first_field_dd] ]), 
+                                           to = options_label_short[first_field_dd, 
+                                                  1:options_number[first_field_dd] ]
+                )
+               }
+              
+              ## First graph
+              data_w_legend <- data.frame(first_factor, second_factor)
+              #  print(c("data_w_legend", data_w_legend))
+              # Selects list of unique values existing in the report for that first field
+              points_unique <- unique(data_report_matrix[,first_field_report])
+              # Gets the number of unique values, to use for the pallete color
+              points_size <- length(points_unique)
+              # Calls a SECOND customized function to convert a series of rgb colors into hexadecimal
+              if(points_size > 1 ) colors_from_fn <- rgb2Hex(.99, .08, .99, .09, .98, .07, points_size)
+              else colors_from_fn <- c("#72B98D")
+  
+              graph_title_1 <- paste(field_label_dd[second_field_dd], "vs.", 
+                                     field_label_dd[first_field_dd], sep = " ")
+              graph_title_1 <- remove_html(graph_title_1)
+
+              if(length(unique(second_factor)) > 12 ) 
+                graph_title_1 <- break_by_words(graph_title_1 , title_len/2)
+              else  graph_title_1 <- break_by_words(graph_title_1 , title_len)
+              
+              x_label <- break_by_words(remove_html(field_label_dd[second_field_dd]), x_title_len)
+              y_label <- break_by_words(remove_html(field_label_dd[first_field_dd]), y_title_len)
+              too_many_cat_x <- ''
+              too_many_cat_y <- ''
+              # Adding warning message and change rotation angle if there are too many categories 
+              # in graph that cause overlapping labels or crowded graphs
+              angle_rotation = 45
+              vertical_just = 0.5
+              x_size = 8
+              legend_size = 7
+              if(length(unique(second_factor)) > 34 ) {
+                # too_many_cat_y <- 'Too many categories! try to reduce'
+                x_size = 7
+                legend_size = 5
+              }
+              if(length(unique(first_factor)) > 34 ) {
+                # too_many_cat_x <- '(Too many categories! try to reduce)'
+                angle_rotation = 90
+                vertical_just = 0
+              }
+  
+              # Graphs stacked bar with legend and report fields in corresponding axes and border in darkblue,
+              # filling with colors from pallete and appropriate labels
+              # X-axis label: 12 points
+              # X-axis tick marks: rotate 45 degrees CCW, move to the left a bit (using vjust,
+              #   since the labels are rotated), and 12 points
+              # Y-axis label: 12 points
+              plot_levels <- ggplot(data=data_w_legend, aes(x=first_factor, fill=second_factor))  +
+                geom_bar(color="darkblue") +
+                scale_fill_manual( values=colors_from_fn) +
+                ggtitle(graph_title_1) +
+                xlab(paste(x_label,too_many_cat_x, sep= ' ')) +
+                ylab(paste(y_label,too_many_cat_y, sep= ' ')) +
+                guides(fill=guide_legend(title='')) +
+                theme(panel.border = element_rect(linetype = "blank", size= 0.9, fill = NA),
+                      plot.title = element_text(hjust = 0.25),
+                      # plot.background = element_rect(fill = "green"),
+                      plot.margin = margin(full_line,full_line,full_line,full_line),
+                      axis.title.x = element_text(size=x_size),
+                      axis.text.x = element_text(size=x_size, 
+                      angle = angle_rotation, 
+                      vjust = vertical_just),
+                      axis.title.y = element_text(size=10),
+                      legend.text = element_text(size=legend_size),
+                      legend.position = "bottom", 
+                      legend.box = "horizontal"
+                )
+              
+              # Workaround to be able to print the table outside the loop
+              if(count_table==1) plot_levels_1_1 <- plot_levels
+              if(count_table==2) plot_levels_1_2 <- plot_levels
+              if(count_table==3) plot_levels_1_3 <- plot_levels
+              if(count_table==4) plot_levels_1_4 <- plot_levels
+              if(count_table==5) plot_levels_1_5 <- plot_levels
+              if(count_table==6) plot_levels_1_6 <- plot_levels
+              if(count_table==7) plot_levels_1_7 <- plot_levels
+              if(count_table==8) plot_levels_1_8 <- plot_levels
+              if(count_table==9) plot_levels_1_9 <- plot_levels
+              if(count_table==10) plot_levels_1_10 <- plot_levels
+              if(count_table==11) plot_levels_1_11 <- plot_levels
+              if(count_table==12) plot_levels_1_12 <- plot_levels
+              if(count_table==13) plot_levels_1_13 <- plot_levels
+              if(count_table==14) plot_levels_1_14 <- plot_levels
+              if(count_table==15) plot_levels_1_15 <- plot_levels
+              if(count_table==16) plot_levels_1_16 <- plot_levels
+              if(count_table==17) plot_levels_1_17 <- plot_levels
+              if(count_table==18) plot_levels_1_18 <- plot_levels
+              if(count_table==19) plot_levels_1_19 <- plot_levels
+              if(count_table==20) plot_levels_1_20 <- plot_levels
+              ###############
+              
+              
+              ## Second graph (variables reversed)
+              data_w_legend <- data.frame(second_factor, first_factor)
+              # Selects list of unique values existing in the report for that first field
+              points_unique <- unique(data_report_matrix[,second_field_report])
+              # Gets the number of unique values, to use for the pallete color
+              points_size <- length(points_unique)
+  
+              # Calls a customized function to convert a series of rgb colors into hexadecimal
+              # THIS CALL IS CAUSING AN ERROR!!!!: Error in rgb(red, green, blue) : 
+              # color intensity nan, not in [0,1]
+              if(points_size > 1 ) colors_from_fn <- rgb2Hex(.99, .38, .99, .19, .8, .27, points_size)
+              else colors_from_fn <- c("#72B98D")
+              # colors_from_fn <- rgb2Hex(.99, .38, .99, .19, .8, .27, points_size)
+  
+              graph_title_2 <- paste(field_label_dd[first_field_dd], "vs.", 
+                                     field_label_dd[second_field_dd], sep = " ")
+              graph_title_2 <- remove_html(graph_title_2)
+              if(length(unique(first_factor)) > 12 ) graph_title_2 <- break_by_words(graph_title_2 ,
+                                                                                     title_len/2)
+              else  graph_title_2 <- break_by_words(graph_title_2 , title_len)
+              
+              x_label <- break_by_words(remove_html(field_label_dd[first_field_dd]), x_title_len)
+              y_label <- break_by_words(remove_html(field_label_dd[second_field_dd]), y_title_len)
+              
+              too_many_cat_x <- ''
+              too_many_cat_y <- ''
+              # Adding warning message if there are too many categories in graph that 
+              # cause overlapping labels or crowded graphs
+              if(length(unique(first_factor)) > 34 ) {
+                # too_many_cat_y <- 'Too many categories! try to reduce'
+                x_size = 7
+                legend_size = 5
+              }
+              if(length(unique(second_factor)) > 34 ) {
+                # too_many_cat_x <- '(Too many categories! try to reduce)'
+                angle_rotation = 90
+                vertical_just = 0
+              }
+
+              # Graphs stacked bar with legend and report fields in corresponding axes and border in darkblue,
+              # filling with colors from pallete and appropriate labels
+              # X-axis label: 12 points
+              # X-axis tick marks: rotate 45 degrees CCW, move to the left a bit (using vjust,
+              #   since the labels are rotated), and 12 points
+              # Y-axis label: 12 points
+  
+             plot_levels <- ggplot(data=data_w_legend, aes(x=second_factor, fill=first_factor))  +
+             geom_bar(color="darkblue") +
+             scale_fill_manual( values=colors_from_fn) +
+             ggtitle(graph_title_2) +
+             xlab(paste(x_label,too_many_cat_x, sep= ' ')) +
+             ylab(paste(y_label,too_many_cat_y, sep= ' ')) +
+             guides(fill=guide_legend(title='')) +
+             theme(panel.border = element_rect(linetype = "blank", size= 0.9, fill = NA),
+                  plot.title = element_text(hjust = 0.25),
+                  # plot.background = element_rect(fill = "green"),
+                  plot.margin = margin(full_line,full_line,full_line,full_line),
+                  axis.title.x = element_text(size=x_size),
+                  axis.text.x  = element_text(size=x_size, angle=45, vjust= 0.5),
+                  axis.title.y = element_text(size=10),
+                  legend.text = element_text(size=legend_size),
+                  legend.position="bottom", 
+                  legend.box = "horizontal"
+            )
+              
+              # Workaround to be able to print the table outside the loop
+              if(count_table==1) plot_levels_2_1 <- plot_levels
+              if(count_table==2) plot_levels_2_2 <- plot_levels
+              if(count_table==3) plot_levels_2_3 <- plot_levels
+              if(count_table==4) plot_levels_2_4 <- plot_levels
+              if(count_table==5) plot_levels_2_5 <- plot_levels
+              if(count_table==6) plot_levels_2_6 <- plot_levels
+              if(count_table==7) plot_levels_2_7 <- plot_levels
+              if(count_table==8) plot_levels_2_8 <- plot_levels
+              if(count_table==9) plot_levels_2_9 <- plot_levels
+              if(count_table==10) plot_levels_2_10 <- plot_levels
+              if(count_table==11) plot_levels_2_11 <- plot_levels
+              if(count_table==12) plot_levels_2_12 <- plot_levels
+              if(count_table==13) plot_levels_2_13 <- plot_levels
+              if(count_table==14) plot_levels_2_14 <- plot_levels
+              if(count_table==15) plot_levels_2_15 <- plot_levels
+              if(count_table==16) plot_levels_2_16 <- plot_levels
+              if(count_table==17) plot_levels_2_17 <- plot_levels
+              if(count_table==18) plot_levels_2_18 <- plot_levels
+              if(count_table==19) plot_levels_2_19 <- plot_levels
+              if(count_table==20) plot_levels_2_20 <- plot_levels
+  
+              ######################
+              ######################
+              
+              second_field_report <- 0
+              skip_loop <- first_field_report + 1
+            }
+          }
+       }
+      }
+    }
+  }
+} # k loop
+} # record id in the report or no filter applied
+
+test_width = "100%"
+
+if(count_table>=1)  { printed_graphs <- TRUE }
+
+if(report_len > 0 & count_table>=1)  plot_levels_1_1
+if(report_len > 0 & count_table>=1)  plot_levels_2_1
+if(report_len > 0 & count_table>=1)   cross_output_1
+if(report_len > 0 & count_table>=2)  plot_levels_1_2
+if(report_len > 0 & count_table>=2)  plot_levels_2_2
+if(report_len > 0 & count_table>=2)   cross_output_2
+if(report_len > 0 & count_table>=3)  plot_levels_1_3
+if(report_len > 0 & count_table>=3)  plot_levels_2_3
+if(report_len > 0 & count_table>=3)   cross_output_3
+if(report_len > 0 & count_table>=4)  plot_levels_1_4
+if(report_len > 0 & count_table>=4)  plot_levels_2_4
+if(report_len > 0 & count_table>=4)   cross_output_4
+if(report_len > 0 & count_table>=5)  plot_levels_1_5
+if(report_len > 0 & count_table>=5)  plot_levels_2_5
+if(report_len > 0 & count_table>=5)   cross_output_5
+if(report_len > 0 & count_table>=6)  plot_levels_1_6
+if(report_len > 0 & count_table>=6)  plot_levels_2_6
+if(report_len > 0 & count_table>=6)   cross_output_6
+if(report_len > 0 & count_table>=7)  plot_levels_1_7
+if(report_len > 0 & count_table>=7)  plot_levels_2_7
+if(report_len > 0 & count_table>=7)   cross_output_7
+if(report_len > 0 & count_table>=8)  plot_levels_1_8
+if(report_len > 0 & count_table>=8)  plot_levels_2_8
+if(report_len > 0 & count_table>=8)   cross_output_8
+if(report_len > 0 & count_table>=9)  plot_levels_1_9
+if(report_len > 0 & count_table>=9)  plot_levels_2_9
+if(report_len > 0 & count_table>=9)   cross_output_9
+if(report_len > 0 & count_table>=10) plot_levels_1_10
+if(report_len > 0 & count_table>=10) plot_levels_2_10
+if(report_len > 0 & count_table>=10)  cross_output_10
+if(report_len > 0 & count_table>=11) plot_levels_1_11
+if(report_len > 0 & count_table>=11) plot_levels_2_11
+if(report_len > 0 & count_table>=11)  cross_output_11
+if(report_len > 0 & count_table>=12) plot_levels_1_12
+if(report_len > 0 & count_table>=12) plot_levels_2_12
+if(report_len > 0 & count_table>=12)  cross_output_12
+if(report_len > 0 & count_table>=13) plot_levels_1_13
+if(report_len > 0 & count_table>=13) plot_levels_2_13
+if(report_len > 0 & count_table>=13)  cross_output_13
+if(report_len > 0 & count_table>=14) plot_levels_1_14
+if(report_len > 0 & count_table>=14) plot_levels_2_14
+if(report_len > 0 & count_table>=14)  cross_output_14
+if(report_len > 0 & count_table>=15) plot_levels_1_15
+if(report_len > 0 & count_table>=15) plot_levels_2_15
+if(report_len > 0 & count_table>=15)  cross_output_15
+if(report_len > 0 & count_table>=16) plot_levels_1_16
+if(report_len > 0 & count_table>=16) plot_levels_2_16
+if(report_len > 0 & count_table>=16)  cross_output_16
+if(report_len > 0 & count_table>=17) plot_levels_1_17
+if(report_len > 0 & count_table>=17) plot_levels_2_17
+if(report_len > 0 & count_table>=17)  cross_output_17
+if(report_len > 0 & count_table>=18) plot_levels_1_18
+if(report_len > 0 & count_table>=18) plot_levels_2_18
+if(report_len > 0 & count_table>=18)  cross_output_18
+if(report_len > 0 & count_table>=19) plot_levels_1_19
+if(report_len > 0 & count_table>=19) plot_levels_2_19
+if(report_len > 0 & count_table>=19)  cross_output_19
+if(report_len > 0 & count_table>=20) plot_levels_1_20
+if(report_len > 0 & count_table>=20) plot_levels_2_20
+if(report_len > 0 & count_table>=20)  cross_output_20
+
+```
+
+```{r printing & maps , echo=FALSE, out.width = test_width, fig.align="center"}
+
+#########################
+# Maps
+#########################
+  
+map_number <- 0
+# If report has record id or it's not using filters, it can produce the plots
+if(field_name_dd[1]%in% names(data_report_matrix) || filter_condition == "") {
+  skip_loop <- 0
+  title_first <- " "
+  title_second <- " "
+  # Loops over all columns in report 
+  for(k in 1:report_cols_len) {
+    first_field_report <- 0
+    first_field_dd <- 0
+    second_field_report <- 0
+    second_field_dd <- 0
+    map_title <- " "
+    # Skip some loops to prevent printing the same graph several times
+    start_loop <- max(k, min(report_cols_len, skip_loop))
+    # Loops over all columns in report, starting from next column to review if it's going to be plotted
+    for(i in start_loop:report_cols_len) {
+      # Loops over all fields in dd to see if they are the correct type and compare field names
+      for(j in 1:dd_len) {
+        # Checks if there are columns in the report
+        if(( i > 0 )) {
+          # Checks if field name in column and dd are the same
+          # print(c("i", i, col_names_report[i]) )
+          # print(c("j", j, field_name_dd[j]) )
+          if(col_names_report[i] == field_name_dd[j]) {
+            # Assigns second field number if first one has been
+            if(second_field_report == 0 && 
+               (grepl('latitude', field_name_dd[j]) || grepl('latitud', field_name_dd[j])) ) {
+              second_field_report <- i
+              second_field_dd <- j
+              title_second <- field_label_dd[j]
+            }
+            # Assigns first field number if it hasn't been assigned
+            if(first_field_report == 0 && 
+               ( grepl('longitude', field_name_dd[j]) || grepl('longitud', field_name_dd[j])) ) {
+              first_field_report <- i
+              first_field_dd <- j
+              title_first <- field_label_dd[j]
+            }
+            # Plots map if two fields have been selected
+            if(first_field_report > 0 && second_field_report > 0
+               && (str_remove(str_remove(title_second, "latitude"), "Latitude") ==
+               str_remove(str_remove(title_first, "longitude"), "Longitude") ||
+               (str_remove(str_remove(title_second, "latitud"), "Latitud") ==
+               str_remove(str_remove(title_first, "longitud"), "Longitud") )
+               )
+            ) {
+              map_title <- paste("Map of",field_label_dd[second_field_dd], "and", field_label_dd[first_field_dd], sep = " ")
+    
+              my_map <- leaflet() %>%
+                addTiles() %>%
+                addCircleMarkers(
+                  data = as.data.frame(data_report_matrix[
+                    ,c(first_field_report-1,first_field_report,
+                       second_field_report)]),
+                  lat = as.numeric(data_report_matrix[,second_field_report]),
+                  lng = as.numeric(data_report_matrix[,first_field_report]),
+                  radius = 3,
+                  # color = ~ as.numeric(data_report_matrix[1,second_field_report]),
+                  # weight = 8,
+                  opacity = 1,
+                  fillOpacity = 1,
+                  fill = TRUE,
+                  fillColor = "#FF0000",
+                  # clusterOptions = NULL,
+                  clusterOptions = markerClusterOptions( spiderfyOnMaxZoom = TRUE, spiderLegPolylineOptions = list(weight = 1.5, color = "#FF0000", opacity = 1)),
+                  color = "#FF0000"
+                  #popup = as.numeric(data_report_matrix[,first_field_report])
+                  #popup = ~paste("Type:", field_label_dd[first_field_dd-1],
+                  #               "<p>Facility:", options_label[first_field_dd-1,
+                  #                                             as.numeric(options_value[first_field_dd-1,
+                  #                                                                      as.numeric(data_report_matrix[1,first_field_report-1])])]
+                  #)
+                ) %>%
+                addControl(map_title, position = "bottomleft")
+              map_number <- map_number + 1
+              if(map_number==1) my_map_1 <- my_map
+              if(map_number==2) my_map_2 <- my_map
+              if(map_number==3) my_map_3 <- my_map
+              if(map_number==4) my_map_4 <- my_map
+              if(map_number==5) my_map_5 <- my_map
+              if(map_number==6) my_map_6 <- my_map
+              if(map_number==7) my_map_7 <- my_map
+              if(map_number==8) my_map_8 <- my_map
+              if(map_number==9) my_map_9 <- my_map
+              if(map_number==10) my_map_10 <- my_map
+              if(map_number==11) my_map_11 <- my_map
+              if(map_number==12) my_map_12 <- my_map
+              if(map_number==13) my_map_13 <- my_map
+              if(map_number==14) my_map_14 <- my_map
+              if(map_number==15) my_map_15 <- my_map
+              if(map_number==16) my_map_16 <- my_map
+              if(map_number==17) my_map_17 <- my_map
+              if(map_number==18) my_map_18 <- my_map
+              if(map_number==19) my_map_19 <- my_map
+              if(map_number==20) my_map_20 <- my_map
+    
+              map_title <- " "
+              second_field_report <- 0
+              skip_loop <- first_field_report + 1
+              break
+            }
+            break
+          }
+        }
+      }
+    }
+  }
+} # if for record id in report or live filter to report not used
+if(map_number>=1) { printed_graphs <- TRUE }
+
+if(report_len > 0 & map_number>=1) my_map_1
+if(report_len > 0 & map_number>=2) my_map_2
+if(report_len > 0 & map_number>=3) my_map_3
+if(report_len > 0 & map_number>=4) my_map_4
+if(report_len > 0 & map_number>=5) my_map_5
+if(report_len > 0 & map_number>=6) my_map_6
+if(report_len > 0 & map_number>=7) my_map_7
+if(report_len > 0 & map_number>=8) my_map_8
+if(report_len > 0 & map_number>=9) my_map_9
+if(report_len > 0 & map_number>=10) my_map_10
+if(report_len > 0 & map_number>=11) my_map_11
+if(report_len > 0 & map_number>=12) my_map_12
+if(report_len > 0 & map_number>=13) my_map_13
+if(report_len > 0 & map_number>=14) my_map_14
+if(report_len > 0 & map_number>=15) my_map_15
+if(report_len > 0 & map_number>=16) my_map_16
+if(report_len > 0 & map_number>=17) my_map_17
+if(report_len > 0 & map_number>=18) my_map_18
+if(report_len > 0 & map_number>=19) my_map_19
+if(report_len > 0 & map_number>=20) my_map_20
+
+# Prepares message when there is no data
+if(report_len == 0) {
+  no_results <- "No results were returned"
+}
+# Prepares message when no graph has been displayed
+if(printed_graphs == FALSE & report_len >= 0) no_graphs <- "No graphs to display"
+
+```
+
+
+#### `r no_results`
+#### `r no_graphs`
+#### `r scatter_not_enough_pts`
+##### `r no_record_id_n_filter`

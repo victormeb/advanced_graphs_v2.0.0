@@ -1,0 +1,100 @@
+{
+	"name": "AdvancedGraphs",
+	"namespace": "VIHA\\AdvancedGraphs",
+	"description": "A module for create advanced graphs from a REDCap report using a R script",
+	"versions": [{
+		"1.0": "Initial Development Version on EMs"
+	}],
+	"compatibility": {
+		"redcap-version-min": "8.0.3"
+	},
+	"authors": [{
+		"name": "Victor Espinosa",
+		"email": "Victor.Espinosa@viha.ca",
+		"institution": "VIHA"
+	}, {
+		"name": "Alvaro Ciganda",
+		"email": "aciganda@iecs.org.ar",
+		"institution": "IECS"
+	}],
+    "no-auth-pages": [],
+  "links": {
+    "control-center": [
+    ],
+    "project": [
+      {
+        "name": "Advanced Graphs",
+        "icon": "gear",
+        "url": "advanced_graphs.php"
+      }
+    ]
+  },
+	"permissions": [
+	"redcap_module_save_configuration",
+	"redcap_every_page_before_render",
+	"redcap_every_page_top"
+	],
+   "system-settings": [
+		{
+			"key": "r-settings",
+			"name": "R Settings",
+			"required": true,
+			"type": "sub_settings",
+			"repeatable":false,
+			"sub_settings":[
+				{
+					 "key": "r-path",
+					 "name": "RScript path (include Rscript.exe or the name you have)",
+					 "required": true,
+					 "type": "text",
+					 "repeatable": false
+				},
+				{
+					 "key": "pandoc-path",
+					 "name": "Pandoc path (folder name without last slash)",
+					 "required": true,
+					 "type": "text",
+					 "repeatable": false
+				},
+				{
+					 "key": "r-libraries-path",
+					 "name": "Path to R libraries (folder name without last slash)",
+					 "required": true,
+					 "type": "text",
+					 "repeatable": true
+				}
+			]
+		},
+		{
+			 "key": "projects-api-tokens-note",
+			 "name": "Tokens to be used by R to get report data. Only projects included in this list can use this module.",
+			 "required": false,
+			 "type": "descriptive",
+			 "repeatable": false
+		},
+		{
+			"key": "projects-api-tokens",
+			"name": "Projects API tokens",
+			"required": true,
+			"type": "sub_settings",
+			"repeatable":true,
+			"sub_settings":[
+				{
+					 "key": "project-pid",
+					 "name": "Project",
+					 "required": true,
+					 "type": "project-id",
+					 "repeatable": false
+				},
+				{
+					 "key": "project-token",
+					 "name": "Token",
+					 "required": true,
+					 "type": "text",
+					 "repeatable": false
+				}
+			]
+		}
+	 ],
+   "project-settings": []
+}
