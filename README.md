@@ -7,7 +7,7 @@ This REDCap module displays additional advanced graphs from a report in an easy 
 
 ## Prerequisites
 - REDCap >= 8.10.12 (It hasn't been tested for previous versions but it may still work for some recent ones).
-- R Software for stats >= v 3.5.3 and libraries stringi, RColorBrewer, expss, formattable, ggplot2, htmltools, htmlwidgets, leaflet, likert, plyr, psych, RCurl, HH, stringr and tidyr 
+- R Software for stats >= v 3.5.3 and libraries stringi, RColorBrewer, expss, formattable, ggplot2, htmltools, htmlwidgets, leaflet, likert, plyr, psych, RCurl, HH, stringr, igraph and tidyr 
 - Export API for each project to use the module
 
 
