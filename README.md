@@ -1,4 +1,4 @@
-# REDCap module: Advanced Graphs
+# REDCap module: Advanced Graphs (Deprecated)
 <b>This module is deprecated. The module authors will not be actively developing features or fixing bugs. They have created a new graphing External Module called <i>Advanced Graphs for Reports.</i> </b>
 This REDCap module displays additional advanced graphs from a report in an easy and secure way for REDCap projects, much in the same way as the existing Graphs and Charts tool. 
 
